@@ -129,19 +129,20 @@ def launch_session(account: str | None = None):
     state["next_session_id"] = session_id + 1
     pane_name = f"claude-{session_id}"
 
-    cmd = f"bash {LAUNCH_SCRIPT} {account}"
+    # Pass as list to avoid shell-splitting issues with paths containing spaces
+    tmux_cmd = ["bash", str(LAUNCH_SCRIPT), account]
 
     # Create window in existing session, or bootstrap a new one
     result = subprocess.run(
         ["tmux", "new-window", "-n", pane_name, "-P", "-F",
-         "#{session_name}:#{window_index}.#{pane_index}", cmd],
+         "#{session_name}:#{window_index}.#{pane_index}"] + tmux_cmd,
         capture_output=True, text=True,
     )
     if result.returncode != 0:
         # No session running — create one
         result = subprocess.run(
             ["tmux", "new-session", "-d", "-s", "cms", "-n", pane_name, "-P", "-F",
-             "#{session_name}:#{window_index}.#{pane_index}", cmd],
+             "#{session_name}:#{window_index}.#{pane_index}"] + tmux_cmd,
             capture_output=True, text=True,
         )
         if result.returncode != 0:
@@ -160,11 +161,12 @@ def launch_session(account: str | None = None):
 
     print(f"Launched pane: {pane_id}  (tracked for keepalive)")
 
-    # Attach
+    # Attach — split on ":" to get session name (pane_id is "session:window.pane")
+    session_name = pane_id.split(":")[0]
     if os.environ.get("TMUX"):
         subprocess.run(["tmux", "select-window", "-t", pane_id])
     else:
-        subprocess.run(["tmux", "attach", "-t", pane_id.split(".")[0]])
+        subprocess.run(["tmux", "attach", "-t", session_name])
 
 
 # ── Status ───────────────────────────────────────────────────────────────────
@@ -307,6 +309,7 @@ def run_setup(reauth: str | None = None):
                     if k in oauth
                 }
                 token_file.write_text(json.dumps(token_data))
+                token_file.chmod(0o600)
                 print("  ✓ Token extracted from Keychain")
             else:
                 print("  Could not read Keychain. Make sure you're logged into Claude Code.")
@@ -347,6 +350,7 @@ def run_setup(reauth: str | None = None):
                         print("  Invalid token (missing accessToken). Skipping.")
                     else:
                         token_file.write_text(json.dumps(token_data))
+                        token_file.chmod(0o600)
                         print("  ✓ Secondary token saved")
                 except json.JSONDecodeError:
                     print("  Invalid JSON. Skipping secondary account for now.")

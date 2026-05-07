@@ -5,3 +5,5 @@ state.json
 daemon.log
 daemon-error.log
 launch.sh.bak
+# Sensitive account data — never commit
+~/.claude-accounts/

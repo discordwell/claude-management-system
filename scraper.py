@@ -83,13 +83,13 @@ def _build_session(account: str) -> requests.Session:
         return _session_from_chrome()
 
 
-def get_usage(account: str) -> dict:
-    """
-    Return usage dict for the account:
-      {"five_hour": {"utilization": float, "resets_at": str}, "seven_day": {...}, ...}
-    Raises RuntimeError on auth failure or network error.
-    """
-    s = _build_session(account)
+def _get_org_uuid(account: str, s: requests.Session) -> str:
+    """Fetch and cache the org UUID (it never changes)."""
+    cfg_file = ACCOUNTS_DIR / account / "scraper_config.json"
+    cfg = _load_config(account)
+
+    if "org_uuid" in cfg:
+        return cfg["org_uuid"]
 
     r = s.get(f"{BASE_URL}/api/organizations")
     if r.status_code == 403:
@@ -98,9 +98,24 @@ def get_usage(account: str) -> dict:
             f"Check Chrome login or run: cms setup --reauth {account}"
         )
     r.raise_for_status()
+    orgs = r.json()
+    if not orgs:
+        raise RuntimeError(f"No organizations returned for '{account}'")
 
-    org_uuid = r.json()[0]["uuid"]
+    uuid = orgs[0]["uuid"]
+    cfg["org_uuid"] = uuid
+    cfg_file.write_text(json.dumps(cfg))
+    return uuid
 
+
+def get_usage(account: str) -> dict:
+    """
+    Return usage dict for the account:
+      {"five_hour": {"utilization": float, "resets_at": str}, "seven_day": {...}, ...}
+    Raises RuntimeError on auth failure or network error.
+    """
+    s = _build_session(account)
+    org_uuid = _get_org_uuid(account, s)
     r = s.get(f"{BASE_URL}/api/organizations/{org_uuid}/usage")
     r.raise_for_status()
     return r.json()

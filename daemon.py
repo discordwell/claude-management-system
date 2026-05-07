@@ -6,6 +6,7 @@ Checks active Claude tmux panes every 60s. If a pane has been idle for
 """
 import json
 import logging
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -16,6 +17,13 @@ LOG_FILE = BASE_DIR / "daemon.log"
 
 IDLE_THRESHOLD_SECS = 55 * 60  # 55 minutes
 CHECK_INTERVAL_SECS = 60
+
+# launchd doesn't inherit PATH or tmux's socket directory from the user session.
+# Set TMUX_TMPDIR so tmux commands can locate the running server's socket.
+_uid = os.getuid()
+_tmux_dir = f"/tmp/tmux-{_uid}"
+if "TMUX_TMPDIR" not in os.environ:
+    os.environ["TMUX_TMPDIR"] = _tmux_dir
 
 logging.basicConfig(
     filename=str(LOG_FILE),
