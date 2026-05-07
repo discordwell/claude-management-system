@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+cache.json
+state.json
+daemon.log
+daemon-error.log
+launch.sh.bak

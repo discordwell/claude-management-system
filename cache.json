@@ -1,0 +1,36 @@
+{
+  "usage_primary": {
+    "ts": 1778159229.901412,
+    "data": {
+      "five_hour": {
+        "utilization": 31.0,
+        "resets_at": "2026-05-07T16:30:00.280002+00:00"
+      },
+      "seven_day": {
+        "utilization": 0.0,
+        "resets_at": "2026-05-14T13:00:00.280025+00:00"
+      },
+      "seven_day_oauth_apps": null,
+      "seven_day_opus": null,
+      "seven_day_sonnet": {
+        "utilization": 0.0,
+        "resets_at": "2026-05-14T13:00:00.280034+00:00"
+      },
+      "seven_day_cowork": null,
+      "seven_day_omelette": {
+        "utilization": 0.0,
+        "resets_at": null
+      },
+      "tangelo": null,
+      "iguana_necktie": null,
+      "omelette_promotional": null,
+      "extra_usage": {
+        "is_enabled": false,
+        "monthly_limit": null,
+        "used_credits": null,
+        "utilization": null,
+        "currency": null
+      }
+    }
+  }
+}
