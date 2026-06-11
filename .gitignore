@@ -2,8 +2,8 @@ __pycache__/
 *.pyc
 cache.json
 state.json
+.state.lock
 daemon.log
 daemon-error.log
 launch.sh.bak
-# Sensitive account data — never commit
-~/.claude-accounts/
+# Sensitive account data lives in ~/.claude-accounts (outside the repo) — never copy it in.
