@@ -2,6 +2,21 @@
 
 ## Session Summaries
 
+### 2026-06-17T08:29Z
+Landed the in-progress reliability rework and added log rotation. Root cause
+found in `daemon.log`: the running daemon was crash-looping every 60s on
+`FileNotFoundError: 'tmux'` (launchd's PATH lacks Homebrew) — 4173 identical
+tracebacks, 4.7 MB. The WIP fixes it two ways: `daemon._tmux_bin()` resolves
+the binary explicitly, and the generated plist now sets PATH. Also landed:
+`statestore.py` (flock + atomic-write state shared by CLI/daemon), the daemon
+rewrite (one `tmux list-panes` per cycle, `#{window_activity}` not the
+non-existent `#{pane_activity}`, pane-id+PID matching with a recycled-pane
+guard, race-safe prune), lazy scraper imports + 30s timeouts, install to
+`~/.local/bin`, and a 56-test suite. New work this session: a
+`RotatingFileHandler` (1 MB x 3) so the log can never balloon again, with a
+test. Two commits on main; left unpushed (orchestrator pushes). Daemon picks
+up the fixes on the next `cms daemon restart`.
+
 ### 2026-05-07T13:10Z
 Built the Claude Management System (cms) from scratch. Full design → build → test → deploy cycle. Key discoveries: Bearer tokens 403 on claude.ai API (needs cookie auth); `anthropic-client-platform: web_claude_ai` header required; usage endpoint is `GET /api/organizations/{uuid}/usage`. Switched from playwright to browser_cookie3 for primary account scraping (extracts Chrome cookies directly, much simpler). Primary account fully working; secondary account setup path documented. Committed to GitHub: https://github.com/discordwell/claude-management-system
 
