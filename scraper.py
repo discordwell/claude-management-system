@@ -10,12 +10,16 @@ Account config stored in ~/.claude-accounts/{account}/scraper_config.json:
   {"playwright": true}                           — use playwright persistent context (fallback)
   {}                                             — use default Chrome profile (primary default)
 """
+from __future__ import annotations
+
 import json
-import requests
 from pathlib import Path
+
+import statestore
 
 ACCOUNTS_DIR = Path.home() / ".claude-accounts"
 BASE_URL = "https://claude.ai"
+REQUEST_TIMEOUT = 30  # seconds — a hung connection should not block `cms` forever
 
 _HEADERS = {
     "User-Agent": (
@@ -30,11 +34,16 @@ _HEADERS = {
 
 def _load_config(account: str) -> dict:
     cfg = ACCOUNTS_DIR / account / "scraper_config.json"
-    return json.loads(cfg.read_text()) if cfg.exists() else {}
+    try:
+        config = json.loads(cfg.read_text())
+        return config if isinstance(config, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
-def _session_from_chrome(cookie_file: str | None = None) -> requests.Session:
+def _session_from_chrome(cookie_file: str | None = None):
     import browser_cookie3
+    import requests
 
     kwargs = {"domain_name": ".claude.ai"}
     if cookie_file:
@@ -47,8 +56,9 @@ def _session_from_chrome(cookie_file: str | None = None) -> requests.Session:
     return s
 
 
-def _session_from_playwright(account: str) -> requests.Session:
+def _session_from_playwright(account: str):
     """Build a requests session by fetching cookies from a playwright persistent context."""
+    import requests
     from playwright.sync_api import sync_playwright
 
     context_dir = ACCOUNTS_DIR / account / "browser-context"
@@ -71,7 +81,7 @@ def _session_from_playwright(account: str) -> requests.Session:
     return s
 
 
-def _build_session(account: str) -> requests.Session:
+def _build_session(account: str):
     cfg = _load_config(account)
 
     if cfg.get("chrome_cookie_file"):
@@ -83,7 +93,7 @@ def _build_session(account: str) -> requests.Session:
         return _session_from_chrome()
 
 
-def _get_org_uuid(account: str, s: requests.Session) -> str:
+def _get_org_uuid(account: str, s) -> str:
     """Fetch and cache the org UUID (it never changes)."""
     cfg_file = ACCOUNTS_DIR / account / "scraper_config.json"
     cfg = _load_config(account)
@@ -91,7 +101,7 @@ def _get_org_uuid(account: str, s: requests.Session) -> str:
     if "org_uuid" in cfg:
         return cfg["org_uuid"]
 
-    r = s.get(f"{BASE_URL}/api/organizations")
+    r = s.get(f"{BASE_URL}/api/organizations", timeout=REQUEST_TIMEOUT)
     if r.status_code == 403:
         raise RuntimeError(
             f"Auth failed for '{account}' (403). "
@@ -104,7 +114,7 @@ def _get_org_uuid(account: str, s: requests.Session) -> str:
 
     uuid = orgs[0]["uuid"]
     cfg["org_uuid"] = uuid
-    cfg_file.write_text(json.dumps(cfg))
+    statestore.atomic_write_json(cfg_file, cfg)
     return uuid
 
 
@@ -116,7 +126,7 @@ def get_usage(account: str) -> dict:
     """
     s = _build_session(account)
     org_uuid = _get_org_uuid(account, s)
-    r = s.get(f"{BASE_URL}/api/organizations/{org_uuid}/usage")
+    r = s.get(f"{BASE_URL}/api/organizations/{org_uuid}/usage", timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     return r.json()
 
@@ -150,6 +160,8 @@ def setup_browser_context(account: str):
         except Exception:
             pass
 
-    # After login, record that this account uses playwright
+    # After login, record that this account uses playwright. Deliberately
+    # drop any cached org_uuid: a reauth may have logged into a different
+    # account, so the org must be re-discovered with the new cookies.
     cfg_file = ACCOUNTS_DIR / account / "scraper_config.json"
-    cfg_file.write_text(json.dumps({"playwright": True}))
+    statestore.atomic_write_json(cfg_file, {"playwright": True})

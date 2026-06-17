@@ -13,30 +13,23 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent
+import statestore
+
+BASE_DIR = Path(__file__).resolve().parent
 ACCOUNTS_DIR = Path.home() / ".claude-accounts"
-STATE_FILE = BASE_DIR / "state.json"
 CACHE_FILE = BASE_DIR / "cache.json"
 LAUNCH_SCRIPT = BASE_DIR / "launch.sh"
 DAEMON_PLIST_DEST = Path.home() / "Library/LaunchAgents/com.discordwell.cms-daemon.plist"
 DAEMON_LABEL = "com.discordwell.cms-daemon"
 CACHE_TTL = 300  # 5 minutes
 
-
-# ── State / Cache ────────────────────────────────────────────────────────────
-
-def load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text())
-        except Exception:
-            pass
-    return {"sessions": {}, "next_session_id": 1}
+# Captures the stable pane id (%N) and pane PID alongside the human-readable
+# address so the daemon can verify it is typing into the right pane even if
+# tmux recycles window indices.
+PANE_OUTPUT_FORMAT = "#{session_name}:#{window_index}.#{pane_index}|#{pane_id}|#{pane_pid}"
 
 
-def save_state(state: dict):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
-
+# ── Cache ────────────────────────────────────────────────────────────────────
 
 def load_cache() -> dict:
     if CACHE_FILE.exists():
@@ -48,7 +41,7 @@ def load_cache() -> dict:
 
 
 def save_cache(cache: dict):
-    CACHE_FILE.write_text(json.dumps(cache, indent=2))
+    statestore.atomic_write_json(CACHE_FILE, cache)
 
 
 # ── Account / Usage ──────────────────────────────────────────────────────────
@@ -106,8 +99,13 @@ def best_account() -> tuple[str, dict]:
 
 # ── tmux ─────────────────────────────────────────────────────────────────────
 
-def tmux_running() -> bool:
-    return subprocess.run(["tmux", "list-sessions"], capture_output=True).returncode == 0
+def _parse_pane_output(out: str) -> tuple[str, str | None, str | None]:
+    """Split PANE_OUTPUT_FORMAT output into (address, pane_uid, pane_pid)."""
+    parts = out.rsplit("|", 2)
+    if len(parts) != 3:
+        return out, None, None
+    addr, uid, pid = parts
+    return addr, uid or None, pid or None
 
 
 def launch_session(account: str | None = None):
@@ -124,9 +122,12 @@ def launch_session(account: str | None = None):
             print(f"Account '{account}' not configured. Run: cms setup")
             sys.exit(1)
 
-    state = load_state()
-    session_id = state["next_session_id"]
-    state["next_session_id"] = session_id + 1
+    def claim_id(state):
+        sid = state["next_session_id"]
+        state["next_session_id"] = sid + 1
+        return sid
+
+    session_id = statestore.update_state(claim_id)
     pane_name = f"claude-{session_id}"
 
     # Pass as list to avoid shell-splitting issues with paths containing spaces
@@ -134,37 +135,40 @@ def launch_session(account: str | None = None):
 
     # Create window in existing session, or bootstrap a new one
     result = subprocess.run(
-        ["tmux", "new-window", "-n", pane_name, "-P", "-F",
-         "#{session_name}:#{window_index}.#{pane_index}"] + tmux_cmd,
+        ["tmux", "new-window", "-n", pane_name, "-P", "-F", PANE_OUTPUT_FORMAT] + tmux_cmd,
         capture_output=True, text=True,
     )
     if result.returncode != 0:
         # No session running — create one
         result = subprocess.run(
             ["tmux", "new-session", "-d", "-s", "cms", "-n", pane_name, "-P", "-F",
-             "#{session_name}:#{window_index}.#{pane_index}"] + tmux_cmd,
+             PANE_OUTPUT_FORMAT] + tmux_cmd,
             capture_output=True, text=True,
         )
         if result.returncode != 0:
             print(f"Error creating tmux session: {result.stderr}")
             sys.exit(1)
 
-    pane_id = result.stdout.strip()
+    pane_addr, pane_uid, pane_pid = _parse_pane_output(result.stdout.strip())
 
-    state["sessions"][pane_id] = {
-        "account": account,
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "session_id": session_id,
-        "pane_name": pane_name,
-    }
-    save_state(state)
+    def record_session(state):
+        state["sessions"][pane_addr] = {
+            "account": account,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "session_id": session_id,
+            "pane_name": pane_name,
+            "pane_uid": pane_uid,
+            "pane_pid": pane_pid,
+        }
 
-    print(f"Launched pane: {pane_id}  (tracked for keepalive)")
+    statestore.update_state(record_session)
 
-    # Attach — split on ":" to get session name (pane_id is "session:window.pane")
-    session_name = pane_id.split(":")[0]
+    print(f"Launched pane: {pane_addr}  (tracked for keepalive)")
+
+    # Attach — split on ":" to get session name (pane_addr is "session:window.pane")
+    session_name = pane_addr.split(":")[0]
     if os.environ.get("TMUX"):
-        subprocess.run(["tmux", "select-window", "-t", pane_id])
+        subprocess.run(["tmux", "select-window", "-t", pane_uid or pane_addr])
     else:
         subprocess.run(["tmux", "attach", "-t", session_name])
 
@@ -196,12 +200,13 @@ def show_status():
         print(f"    Sonnet  (7d):  {_fmt_util(data, 'seven_day_sonnet')}")
         print()
 
-    state = load_state()
+    state = statestore.load_state()
     sessions = state.get("sessions", {})
     if sessions:
         print(f"  Active sessions: {len(sessions)}")
         for pid, info in sessions.items():
-            print(f"    {pid}  ({info['account']})  started {info['started_at'][:19]}")
+            started = (info.get("started_at") or "")[:19]
+            print(f"    {pid}  ({info.get('account', '?')})  started {started}")
     else:
         print("  No active sessions tracked.")
 
@@ -213,6 +218,9 @@ def _plist_content() -> str:
     script = str(BASE_DIR / "daemon.py")
     log = str(BASE_DIR / "daemon.log")
     err_log = str(BASE_DIR / "daemon-error.log")
+    # launchd's default PATH is /usr/bin:/bin:/usr/sbin:/sbin — include the
+    # Homebrew prefixes so the daemon can find tmux.
+    path_env = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -224,6 +232,11 @@ def _plist_content() -> str:
         <string>{py}</string>
         <string>{script}</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{path_env}</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -276,6 +289,11 @@ def manage_daemon(action: str):
             print("\n".join(lines[-50:]))
         else:
             print("No log file yet.")
+        err_log = BASE_DIR / "daemon-error.log"
+        if err_log.exists() and err_log.stat().st_size > 0:
+            err_lines = err_log.read_text().splitlines()
+            print("\n── daemon-error.log (last 20) ──")
+            print("\n".join(err_lines[-20:]))
 
 
 # ── Setup ────────────────────────────────────────────────────────────────────
@@ -299,15 +317,18 @@ def run_setup(reauth: str | None = None):
                 ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
                 capture_output=True, text=True,
             )
+            oauth = {}
             if r.returncode == 0:
-                keychain = json.loads(r.stdout)
-                oauth = keychain.get("claudeAiOauth", {})
-                # Store only the fields CLAUDE_CODE_OAUTH_TOKEN needs
-                token_data = {
-                    k: oauth[k]
-                    for k in ("accessToken", "refreshToken", "expiresAt")
-                    if k in oauth
-                }
+                try:
+                    oauth = json.loads(r.stdout).get("claudeAiOauth", {})
+                except json.JSONDecodeError:
+                    pass
+            token_data = {
+                k: oauth[k]
+                for k in ("accessToken", "refreshToken", "expiresAt")
+                if k in oauth
+            }
+            if "accessToken" in token_data:
                 token_file.write_text(json.dumps(token_data))
                 token_file.chmod(0o600)
                 print("  ✓ Token extracted from Keychain")
@@ -363,7 +384,6 @@ def run_setup(reauth: str | None = None):
         # (primary uses Chrome default profile cookies via browser_cookie3 — no browser needed)
         if acct == "secondary" and token_file.exists():
             cfg_file = acct_dir / "scraper_config.json"
-            context_dir = acct_dir / "browser-context"
             if not cfg_file.exists() or reauth:
                 print("  Setting up scraping for secondary account...")
                 print("  A browser will open — log into claude.ai with your SECONDARY account.")
