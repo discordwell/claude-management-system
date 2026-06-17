@@ -6,7 +6,9 @@ and keeps idle sessions' prompt caches warm.
 - `cms` — checks both accounts' quota and launches Claude Code (in a tmux
   window) on the account with the most headroom: it skips an account whose
   weekly cap is exhausted, then picks the lower 5-hour usage
-- `cms status` — live quota for both accounts (5-hour, 7-day, Sonnet buckets)
+- `cms status` — live quota for both accounts (5-hour, 7-day, Sonnet buckets),
+  plus each tracked session's live/idle state (reconciled against tmux, so
+  stale entries show as `gone` rather than lingering)
 - A launchd keepalive daemon sends a tiny `.` message to any tracked session
   idle for 55 minutes, so the 1-hour prompt cache never goes cold
 
@@ -30,10 +32,11 @@ claude.ai for the primary account.
 cms                  # launch Claude on the account with most headroom
 cms primary          # force a specific account
 cms secondary
-cms status           # quota for both accounts + tracked sessions
+cms status           # quota for both accounts + live/idle of tracked sessions
 cms daemon logs      # tail the keepalive daemon log
 cms daemon restart   # reload the daemon (needed after updating daemon.py)
 cms setup --reauth secondary   # redo browser login for scraping
+cms setup --reauth primary     # clear primary's cached org id (after Chrome re-login)
 ```
 
 ## How it works

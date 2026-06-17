@@ -50,6 +50,11 @@ def is_configured(account: str) -> bool:
     return (ACCOUNTS_DIR / account / "oauth_token.json").exists()
 
 
+def any_configured() -> bool:
+    """True if at least one account is set up (cms can launch onto either)."""
+    return any(is_configured(a) for a in ("primary", "secondary"))
+
+
 def fetch_usage(account: str) -> dict | None:
     """Fetch live usage, updating cache. Returns usage dict or None on error."""
     import scraper as sc
@@ -142,11 +147,9 @@ def launch_session(account: str | None = None):
     if account is None:
         account, usage = best_account()
         other = "secondary" if account == "primary" else "primary"
-        chosen_pct = (usage.get(account) or {}).get("five_hour", {}) or {}
-        other_pct = (usage.get(other) or {}).get("five_hour", {}) or {}
-        print(f"Selected: {account}  ({chosen_pct.get('utilization', '?')}% session used)")
+        print(f"Selected: {account}  ({_fmt_pct(usage.get(account), 'five_hour')} session used)")
         if other in usage:
-            print(f"  {other}: {other_pct.get('utilization', '?')}% session used")
+            print(f"  {other}: {_fmt_pct(usage.get(other), 'five_hour')} session used")
     else:
         if not is_configured(account):
             print(f"Account '{account}' not configured. Run: cms setup")
@@ -205,18 +208,89 @@ def launch_session(account: str | None = None):
 
 # ── Status ───────────────────────────────────────────────────────────────────
 
-def _fmt_util(data: dict | None, key: str) -> str:
-    if not data:
-        return "N/A"
-    bucket = (data.get(key) or {})
-    if not bucket:
-        return "N/A"
+def _fmt_pct(data: dict | None, key: str) -> str:
+    """Terse utilization for the launch banner: 'NN%' or '?'.
+
+    Returns '?' for null/missing/non-numeric utilization (the web API can send
+    an explicit null) so the banner never prints a bogus 'None%'. Guards the
+    isinstance(True, int) bool footgun, like _utilization/_account_score.
+    """
+    bucket = (data or {}).get(key)
+    if not isinstance(bucket, dict):
+        return "?"
     pct = bucket.get("utilization")
-    if pct is None:
-        return "N/A"  # the API can send an explicit null utilization
-    resets = bucket.get("resets_at", "")
-    resets_str = f"  resets {resets}" if resets else ""
-    return f"{pct}%{resets_str}"
+    if isinstance(pct, bool) or not isinstance(pct, (int, float)):
+        return "?"
+    return f"{pct}%"
+
+
+def _fmt_util(data: dict | None, key: str) -> str:
+    """Utilization with reset time for `cms status`, or 'N/A' when unknown."""
+    pct = _fmt_pct(data, key)
+    if pct == "?":
+        return "N/A"
+    bucket = (data or {}).get(key)
+    resets = bucket.get("resets_at", "") if isinstance(bucket, dict) else ""
+    return f"{pct}  resets {resets}" if resets else pct
+
+
+def _session_liveness(sessions: dict, panes: list[dict] | None, now: int) -> list[dict]:
+    """Annotate tracked sessions with live/idle status (pure → testable).
+
+    ``panes`` is daemon.list_live_panes() output, or None when the tmux query
+    itself failed (rows are then 'unknown' rather than wrongly 'gone'). Reuses
+    the daemon's pane matcher so `cms status` and the keepalive daemon always
+    agree on which panes are alive.
+
+    Each row: {key, account, started, status, idle_secs}, where status is
+    'live' (idle_secs set when tmux reports activity), 'gone', or 'unknown'.
+    """
+    import daemon
+
+    rows = []
+    for key, info in sessions.items():
+        row = {
+            "key": key,
+            "account": info.get("account", "?"),
+            "started": (info.get("started_at") or "")[:19],
+            "status": "unknown",
+            "idle_secs": None,
+        }
+        if panes is not None:
+            pane = daemon.match_pane(key, info, panes)
+            if pane is None:
+                row["status"] = "gone"
+            else:
+                row["status"] = "live"
+                if pane["activity"] is not None:
+                    row["idle_secs"] = max(0, now - pane["activity"])
+        rows.append(row)
+    return rows
+
+
+def _fmt_duration(secs: int) -> str:
+    """Human-friendly idle duration: '<1m', '12m', '3h 4m', '2d 1h'."""
+    mins = secs // 60
+    if mins < 1:
+        return "<1m"
+    if mins < 60:
+        return f"{mins}m"
+    hours, rem_min = divmod(mins, 60)
+    if hours < 24:
+        return f"{hours}h {rem_min}m"
+    days, rem_hr = divmod(hours, 24)
+    return f"{days}d {rem_hr}h"
+
+
+def _fmt_session_status(row: dict) -> str:
+    if row["status"] == "gone":
+        return "gone (daemon will prune)"
+    if row["status"] == "unknown":
+        return "status unknown (tmux check failed)"
+    idle = row["idle_secs"]
+    if idle is None:
+        return "live"
+    return f"live, idle {_fmt_duration(idle)}"
 
 
 def show_status():
@@ -232,15 +306,20 @@ def show_status():
         print(f"    Sonnet  (7d):  {_fmt_util(data, 'seven_day_sonnet')}")
         print()
 
-    state = statestore.load_state()
-    sessions = state.get("sessions", {})
-    if sessions:
-        print(f"  Active sessions: {len(sessions)}")
-        for pid, info in sessions.items():
-            started = (info.get("started_at") or "")[:19]
-            print(f"    {pid}  ({info.get('account', '?')})  started {started}")
-    else:
+    sessions = statestore.load_state().get("sessions", {})
+    if not sessions:
         print("  No active sessions tracked.")
+        return
+
+    import daemon
+
+    panes = daemon.list_live_panes()
+    rows = _session_liveness(sessions, panes, int(time.time()))
+    live = sum(1 for r in rows if r["status"] == "live")
+    print(f"  Tracked sessions: {len(rows)} ({live} live)")
+    for r in rows:
+        started = f"   started {r['started']}" if r["started"] else ""
+        print(f"    {r['key']}  ({r['account']})  {_fmt_session_status(r)}{started}")
 
 
 # ── Daemon ───────────────────────────────────────────────────────────────────
@@ -330,6 +409,22 @@ def manage_daemon(action: str):
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 
+def _forget_org_uuid(account: str):
+    """Drop a cached org uuid so the next scrape re-discovers it.
+
+    Used by `cms setup --reauth primary`: primary reads live Chrome cookies, so
+    the org uuid cached in scraper_config.json is the only thing that can go
+    stale (e.g. after logging Chrome into a different org).
+    """
+    cfg_file = ACCOUNTS_DIR / account / "scraper_config.json"
+    try:
+        cfg = json.loads(cfg_file.read_text())
+    except (OSError, ValueError):
+        return
+    if isinstance(cfg, dict) and cfg.pop("org_uuid", None) is not None:
+        statestore.atomic_write_json(cfg_file, cfg)
+
+
 def run_setup(reauth: str | None = None):
     print("═══ CMS Setup ═══\n")
     ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -342,6 +437,13 @@ def run_setup(reauth: str | None = None):
         token_file = acct_dir / "oauth_token.json"
 
         print(f"── {acct.upper()} ACCOUNT ──")
+
+        if reauth == acct == "primary":
+            # primary scrapes with live Chrome cookies; the only stale cache is
+            # the org uuid. Clearing it is primary's analogue of secondary's
+            # browser-context reauth (which re-discovers the org anyway).
+            _forget_org_uuid(acct)
+            print("  ↻ Cleared cached org id (re-read from Chrome on next status)")
 
         if acct == "primary" and not token_file.exists():
             print("Extracting OAuth token from macOS Keychain...")
@@ -462,7 +564,8 @@ Examples:
   cms secondary         Force secondary account
   cms status            Show quota for both accounts
   cms setup             First-run wizard
-  cms setup --reauth primary   Re-authenticate primary browser context
+  cms setup --reauth secondary  Redo secondary browser login for scraping
+  cms setup --reauth primary    Clear primary's cached org id (re-reads Chrome)
   cms daemon start|stop|status|restart|logs
         """,
     )
@@ -489,8 +592,9 @@ Examples:
     elif args.cmd in ("primary", "secondary"):
         launch_session(account=args.cmd)
     else:
-        # Default: auto-balance launch
-        if not is_configured("primary"):
+        # Default: auto-balance launch onto whichever account is configured
+        # (best_account handles a single-account setup, e.g. secondary-only).
+        if not any_configured():
             print("First time? Run: cms setup")
             sys.exit(1)
         launch_session()

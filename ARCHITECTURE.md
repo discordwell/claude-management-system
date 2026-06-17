@@ -8,9 +8,16 @@ and maintain prompt cache by sending keepalive pings to idle sessions.
 ## Components
 
 ### `cms.py` — CLI entry point
-- `cms` (no args): queries both accounts, picks the one with lower 5-hour utilization, launches Claude in a new tmux window
-- `cms status`: shows live quota for both accounts
-- `cms setup [--reauth account]`: first-run wizard + browser context setup
+- `cms` (no args): queries every *configured* account (one or both), picks the
+  one with most headroom, launches Claude in a new tmux window — a single-account
+  (e.g. secondary-only) setup is supported, gated by `any_configured()`
+- `cms status`: shows live quota for both accounts **and** each tracked session's
+  live/idle state, reconciled against tmux via the daemon's pane matcher (a stale
+  entry shows as `gone (daemon will prune)`, not as a phantom active session)
+- `cms setup [--reauth account]`: first-run wizard + browser context setup;
+  `--reauth secondary` redoes the browser login, `--reauth primary` clears the
+  cached org uuid (primary scrapes with live Chrome cookies, so that uuid is the
+  only thing that can go stale — e.g. after logging Chrome into a different org)
 - `cms daemon start|stop|status|restart|logs`: manage keepalive daemon
 
 ### `statestore.py` — Shared state storage
@@ -94,7 +101,7 @@ persistent contexts — the OAuth Bearer token returns 403 from the claude.ai we
 Each configured account is scored by `cms._account_score(usage)`, which returns
 the sort key `(weekly_capped, five_hour_utilization)` — lower is better:
 
-1. Fetch usage for both accounts (cached 5 min)
+1. Fetch usage for each configured account (one or both; cached 5 min)
 2. `weekly_capped` is 1 when `seven_day.utilization >= 100` — an account whose
    7-day cap is exhausted is avoided *before* 5-hour headroom is compared, since
    launching onto a weekly-dead account would fail immediately even though its

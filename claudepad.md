@@ -2,6 +2,31 @@
 
 ## Session Summaries
 
+### 2026-06-17T19:31Z
+Polished the user-facing CLI in `cms.py` (4 real fixes + 31 new tests, 97 total
+green; code-review sub-agent verdict SHIP). (1) **`None%` banner bug**: the
+launch banner did `chosen_pct.get('utilization', '?')`, so an explicit `null`
+utilization from the web API printed `None%` — the same null footgun a prior
+session fixed in `_fmt_util` but missed here. Extracted a terse `_fmt_pct()`
+(returns `?` for null/missing/non-numeric, guards the `isinstance(True,int)`
+bool trap) and rebuilt `_fmt_util()` on top of it (verified behavior-identical
+on all prior cases, plus now N/A on bool/string/non-dict instead of crashing).
+(2) **secondary-only launch**: no-arg `cms` gated on `is_configured("primary")`
+only, so a secondary-only setup printed "First time?" and exited even though
+`best_account()` supports one account — added `any_configured()` and fixed the
+gate. (3) **`cms status` ghost sessions**: it listed every tracked pane as
+active with no liveness check (the committed `state.json` has a June-11 ghost).
+Now reconciles against tmux by reusing the daemon's `match_pane` via a new pure
+`_session_liveness()`, rendering live/idle/gone (+ human `_fmt_duration`). (4)
+**`cms setup --reauth primary`** did nothing yet the help said "Re-authenticate
+primary browser context" (primary has no browser context) — now clears the
+cached org uuid (`_forget_org_uuid`) and the help/README/ARCH wording is fixed.
+Wet test of the real `show_status` surfaced that the **running daemon still runs
+pre-fix code**: the ghost pane is genuinely alive and idle **6d 13h** (no
+keepalives firing), and `daemon.log` is still 5.5 MB — i.e. the PATH/rotation/
+selection fixes from prior sessions haven't been picked up. **User should run
+`cms daemon restart`** to load them. One commit on main, unpushed.
+
 ### 2026-06-17T13:07Z
 Hardened account selection in `cms.py`. Found a latent crash: `best_account()`
 did `pct = util.get("utilization", 100.0)` then `pct < best_util`, so an
@@ -59,8 +84,12 @@ Built the Claude Management System (cms) from scratch. Full design → build →
 
 ### Keepalive
 - Cache TTL for Max subscribers: 1 hour
-- Idle detection: `tmux display-message -p -t {pane_id} '#{pane_activity}'` → Unix timestamp
+- Idle detection: one `tmux list-panes -a -F '...#{window_activity}...'` per cycle
+  → Unix timestamp. **`#{pane_activity}` does NOT exist in tmux** (expands to an
+  empty string, so keepalives never fire) — use `#{window_activity}`.
 - Daemon checks every 60s, pings at 55min threshold
+- `cms status` reuses the daemon's `list_live_panes`/`match_pane` to show each
+  tracked session's live/idle/gone state (so status and the daemon agree)
 
 ### Infrastructure
 - Daemon runs as launchd service: `com.discordwell.cms-daemon`
