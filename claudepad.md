@@ -2,6 +2,24 @@
 
 ## Session Summaries
 
+### 2026-06-17T13:07Z
+Hardened account selection in `cms.py`. Found a latent crash: `best_account()`
+did `pct = util.get("utilization", 100.0)` then `pct < best_util`, so an
+explicit `null` utilization from the web API (valid JSON, not just a missing
+key) raised `TypeError: '<' not supported between NoneType and float` — the
+whole `cms` launch would abort. Refactored selection into two helpers:
+`_utilization(bucket, default)` (tolerates null/missing/non-numeric, and guards
+the `isinstance(True, int)` bool footgun) and `_account_score(data)` returning
+the sort key `(weekly_capped, five_hour_utilization)`. This also closes a
+correctness gap: selection now skips an account whose **7-day cap** is exhausted
+(`seven_day.utilization >= 100`) *before* comparing 5-hour headroom — previously
+a weekly-dead account with a fresh 5h bucket would be picked and fail instantly.
+`_fmt_util` now renders null utilization as `N/A` instead of `None%`. Existing
+behavior preserved (lower-5h wins, ties → primary, failed fetch = full); all
+verified by 11 new tests (67 total, all green) and a code-review pass (no
+defects). Also quieted leaked stdout/log noise in the suite. Docs updated
+(README + ARCHITECTURE selection-algorithm section). One commit on main, unpushed.
+
 ### 2026-06-17T08:29Z
 Landed the in-progress reliability rework and added log rotation. Root cause
 found in `daemon.log`: the running daemon was crash-looping every 60s on

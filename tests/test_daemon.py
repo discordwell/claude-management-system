@@ -181,9 +181,12 @@ class RunOnceTest(unittest.TestCase):
 
     def test_tmux_error_does_not_prune(self):
         self.seed({"cms:1.0": {"pane_uid": "%5", "pane_pid": "100"}})
-        with mock.patch.object(daemon, "list_live_panes", return_value=None):
+        with mock.patch.object(daemon, "list_live_panes", return_value=None), \
+             self.assertLogs(level="WARNING") as logs:
             daemon.run_once(now=10_000_000)
         self.assertIn("cms:1.0", statestore.load_state()["sessions"])
+        # The skipped cycle must be announced so a silent stall is visible.
+        self.assertTrue(any("skipping this cycle" in m for m in logs.output))
 
     def test_prune_spares_session_replaced_under_a_recycled_key(self):
         # cms.py can record a brand-new session under the same address key

@@ -3,8 +3,9 @@
 Personal CLI that balances Claude Code usage across **two Claude Max accounts**
 and keeps idle sessions' prompt caches warm.
 
-- `cms` — checks both accounts' 5-hour session quota and launches Claude Code
-  (in a tmux window) on the account with the most headroom
+- `cms` — checks both accounts' quota and launches Claude Code (in a tmux
+  window) on the account with the most headroom: it skips an account whose
+  weekly cap is exhausted, then picks the lower 5-hour usage
 - `cms status` — live quota for both accounts (5-hour, 7-day, Sonnet buckets)
 - A launchd keepalive daemon sends a tiny `.` message to any tracked session
   idle for 55 minutes, so the 1-hour prompt cache never goes cold

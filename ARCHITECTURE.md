@@ -91,9 +91,20 @@ persistent contexts — the OAuth Bearer token returns 403 from the claude.ai we
 
 ## Selection Algorithm
 
-1. Fetch 5-hour session utilization for both accounts (cached 5 min)
-2. Select account with lower `five_hour.utilization`
-3. Fallback to primary if secondary not configured or both equal
+Each configured account is scored by `cms._account_score(usage)`, which returns
+the sort key `(weekly_capped, five_hour_utilization)` — lower is better:
+
+1. Fetch usage for both accounts (cached 5 min)
+2. `weekly_capped` is 1 when `seven_day.utilization >= 100` — an account whose
+   7-day cap is exhausted is avoided *before* 5-hour headroom is compared, since
+   launching onto a weekly-dead account would fail immediately even though its
+   5-hour bucket looks fresh
+3. Among accounts with weekly headroom, pick the lower `five_hour.utilization`
+4. Comparison is strict (`<`) over the fallback order (primary, secondary), so
+   the first account wins ties — i.e. primary by default
+5. Missing/None/non-numeric usage (a failed fetch, or an explicit `null`
+   utilization from the API) is treated as fully exhausted, so a degraded
+   account never wins the selection by accident
 
 ## Keepalive Rationale
 

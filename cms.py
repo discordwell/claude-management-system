@@ -72,6 +72,37 @@ def fetch_usage(account: str) -> dict | None:
         return cached.get("data")  # return stale data if available
 
 
+def _utilization(bucket: dict | None, default: float) -> float:
+    """Pull a numeric utilization% from a usage bucket, tolerating null/missing.
+
+    The web API can return an explicit ``null`` utilization (not just omit the
+    key), which must not crash the comparison in best_account().
+    """
+    if not isinstance(bucket, dict):
+        return default
+    pct = bucket.get("utilization")
+    if isinstance(pct, bool) or not isinstance(pct, (int, float)):
+        return default  # None, missing, or non-numeric → assume the default
+    return float(pct)
+
+
+def _account_score(data: dict | None) -> tuple[int, float]:
+    """Sort key for account selection — lower is better.
+
+    Returns ``(weekly_capped, five_hour_utilization)`` so an account whose
+    7-day cap is exhausted is avoided *before* 5-hour headroom is compared:
+    launching onto a weekly-dead account would fail immediately even though
+    its 5-hour bucket looks fresh. Missing/None data is treated as fully
+    exhausted (a failed fetch should not win the race to be selected).
+    """
+    if not data:
+        return (1, 100.0)
+    five_hour = _utilization(data.get("five_hour"), default=100.0)
+    weekly = _utilization(data.get("seven_day"), default=0.0)
+    weekly_capped = 1 if weekly >= 100.0 else 0
+    return (weekly_capped, five_hour)
+
+
 def best_account() -> tuple[str, dict]:
     """Return (account_name, {account: usage_dict}) for the account with most headroom."""
     usage = {}
@@ -83,16 +114,15 @@ def best_account() -> tuple[str, dict]:
         print("No accounts configured. Run: cms setup")
         sys.exit(1)
 
-    # Score: lower five_hour utilization = more headroom. Unconfigured = skip.
-    # Fallback order: primary, secondary.
+    # Prefer the account with a free weekly cap, then the lower 5-hour usage.
+    # usage is built in fallback order (primary, secondary) and we compare with
+    # a strict "<", so the first account wins ties — i.e. primary by default.
     best = None
-    best_util = float("inf")
+    best_score = None
     for acct, data in usage.items():
-        util = (data or {}).get("five_hour", {}) or {}
-        pct = util.get("utilization", 100.0)
-        if pct < best_util:
-            best_util = pct
-            best = acct
+        score = _account_score(data)
+        if best_score is None or score < best_score:
+            best, best_score = acct, score
 
     return best or "primary", usage
 
@@ -181,7 +211,9 @@ def _fmt_util(data: dict | None, key: str) -> str:
     bucket = (data.get(key) or {})
     if not bucket:
         return "N/A"
-    pct = bucket.get("utilization", "?")
+    pct = bucket.get("utilization")
+    if pct is None:
+        return "N/A"  # the API can send an explicit null utilization
     resets = bucket.get("resets_at", "")
     resets_str = f"  resets {resets}" if resets else ""
     return f"{pct}%{resets_str}"
