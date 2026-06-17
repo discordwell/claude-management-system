@@ -1,3 +1,4 @@
+import logging
 import subprocess
 import tempfile
 import unittest
@@ -130,6 +131,32 @@ class ScanTest(unittest.TestCase):
         pane = self.pane(activity=None)
         to_ping, dead = daemon.scan(sessions, [pane], 10_000_000)
         self.assertEqual((to_ping, dead), ([], []))
+
+
+class LoggingTest(unittest.TestCase):
+    def test_rotation_caps_log_growth(self):
+        # A failure loop must not be able to grow daemon.log without bound.
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            log = base / "daemon.log"
+            root = logging.getLogger()
+            prev_level = root.level
+            with mock.patch.object(daemon, "LOG_FILE", log):
+                handler = daemon._configure_logging(max_bytes=1000, backup_count=2)
+            try:
+                for _ in range(500):
+                    root.info("x" * 80)  # ~62 KB written in total
+            finally:
+                root.removeHandler(handler)
+                handler.close()
+                root.setLevel(prev_level)
+
+            # The active log stays near its cap instead of holding everything...
+            self.assertLessEqual(log.stat().st_size, 2000)
+            # ...rotation actually happened...
+            self.assertTrue((base / "daemon.log.1").exists())
+            # ...and backup_count is honored (no unbounded .3/.4/...).
+            self.assertFalse((base / "daemon.log.3").exists())
 
 
 class RunOnceTest(unittest.TestCase):

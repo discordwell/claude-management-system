@@ -48,7 +48,9 @@ and maintain prompt cache by sending keepalive pings to idle sessions.
   the `session:window.pane` address
 - Auto-removes dead panes via `statestore.update_state` (fresh re-read under
   the lock); unexpected tmux failures skip the cycle rather than pruning
-- Logs to `daemon.log` / `daemon-error.log`
+- Logs to `daemon.log` (size-capped: a `RotatingFileHandler` keeps it under
+  ~1 MB with 3 rotations, so a failure loop can't fill the disk) and
+  `daemon-error.log`
 - **Code changes take effect on the next `cms daemon restart`** — the running
   daemon keeps executing the old code until then
 

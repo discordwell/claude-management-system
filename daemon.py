@@ -12,6 +12,7 @@ into whatever now lives at a recycled index would be worse than doing nothing.
 """
 import functools
 import logging
+import logging.handlers
 import os
 import shutil
 import subprocess
@@ -25,6 +26,12 @@ LOG_FILE = BASE_DIR / "daemon.log"
 
 IDLE_THRESHOLD_SECS = 55 * 60  # 55 minutes
 CHECK_INTERVAL_SECS = 60
+
+# Cap the daemon log so a tight failure loop (or months of keepalive/prune
+# lines) can't grow it without bound. A missing tmux once spammed multiple MB
+# of identical tracebacks here, one per cycle.
+LOG_MAX_BYTES = 1_000_000  # 1 MB per file
+LOG_BACKUP_COUNT = 3       # keep daemon.log + .1/.2/.3  (~4 MB ceiling)
 
 # One list-panes call per cycle covers existence, identity, and idle time.
 # #{window_activity} is the documented "time of last activity" variable
@@ -52,6 +59,19 @@ def _ensure_tmux_env():
     """launchd doesn't inherit the user session's tmux socket directory."""
     if "TMUX_TMPDIR" not in os.environ:
         os.environ["TMUX_TMPDIR"] = f"/tmp/tmux-{os.getuid()}"
+
+
+def _configure_logging(max_bytes: int = LOG_MAX_BYTES,
+                       backup_count: int = LOG_BACKUP_COUNT):
+    """Install a size-capped rotating handler on the root logger and return it."""
+    handler = logging.handlers.RotatingFileHandler(
+        str(LOG_FILE), maxBytes=max_bytes, backupCount=backup_count
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+    return handler
 
 
 def list_live_panes() -> list[dict] | None:
@@ -182,11 +202,7 @@ def run_once(now: int | None = None):
 
 
 def main():
-    logging.basicConfig(
-        filename=str(LOG_FILE),
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
+    _configure_logging()
     _ensure_tmux_env()
     logging.info("CMS keepalive daemon started")
 

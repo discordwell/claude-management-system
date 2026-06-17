@@ -4,6 +4,7 @@ cache.json
 state.json
 .state.lock
 daemon.log
+daemon.log.*
 daemon-error.log
 launch.sh.bak
 # Sensitive account data lives in ~/.claude-accounts (outside the repo) — never copy it in.
