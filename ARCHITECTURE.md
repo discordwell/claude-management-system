@@ -11,9 +11,14 @@ and maintain prompt cache by sending keepalive pings to idle sessions.
 - `cms` (no args): queries every *configured* account (one or both), picks the
   one with most headroom, launches Claude in a new tmux window — a single-account
   (e.g. secondary-only) setup is supported, gated by `any_configured()`
-- `cms status`: shows live quota for both accounts **and** each tracked session's
-  live/idle state, reconciled against tmux via the daemon's pane matcher (a stale
-  entry shows as `gone (daemon will prune)`, not as a phantom active session)
+- `cms status`: shows live quota for both accounts, a **daemon health line**, and
+  each tracked session's live/idle state, reconciled against tmux via the daemon's
+  pane matcher (a stale entry shows as `gone (daemon will prune)`, not as a phantom
+  active session). The daemon line cross-checks launchd (`_daemon_loaded()`)
+  against the daemon's own heartbeat (`daemon.read_status()`) so a not-running,
+  *stalled* (no recent heartbeat), or *stale-code* daemon is called out with the
+  fix — the visibility gap that previously hid a multi-day crash-loop and a
+  6-day-idle ghost pane whose daemon was running pre-fix code
 - `cms setup [--reauth account]`: first-run wizard + browser context setup;
   `--reauth secondary` redoes the browser login, `--reauth primary` clears the
   cached org uuid (primary scrapes with live Chrome cookies, so that uuid is the
@@ -69,8 +74,16 @@ and maintain prompt cache by sending keepalive pings to idle sessions.
 - Logs to `daemon.log` (size-capped: a `RotatingFileHandler` keeps it under
   ~1 MB with 3 rotations, so a failure loop can't fill the disk) and
   `daemon-error.log`
+- **Writes a heartbeat** to `daemon_status.json` at the top of every cycle
+  (`write_heartbeat`): `{pid, started_at, code_mtime, last_run}`. `code_mtime`
+  is snapshotted **once at startup** from the daemon's source files
+  (`source_mtime()` over `daemon.py` + `statestore.py`), so when the live source
+  is later edited the CLI can detect the daemon is running stale code. The file
+  is single-writer (only the daemon), so an atomic replace suffices — no lock —
+  and a write failure is logged and swallowed rather than crashing the loop
 - **Code changes take effect on the next `cms daemon restart`** — the running
-  daemon keeps executing the old code until then
+  daemon keeps executing the old code until then; the heartbeat's `code_mtime`
+  makes that staleness visible in `cms status` instead of silent
 
 ### `launch.sh` — Per-session launcher (called by tmux)
 - Takes account name as arg
@@ -98,6 +111,8 @@ and maintain prompt cache by sending keepalive pings to idle sessions.
 - `.state.lock`: flock sidecar serializing state writers
 - `cache.json`: quota cache `{usage_primary: {ts, data}, usage_secondary: {ts, data}}`
 - `daemon.log`: keepalive daemon log (last 50 lines via `cms daemon logs`)
+- `daemon_status.json`: daemon heartbeat `{pid, started_at, code_mtime, last_run}`,
+  rewritten each cycle; read by `cms status` to report daemon health
 
 ## Auth Architecture
 
@@ -134,5 +149,6 @@ for as long as the session is open.
 
 `python3 -m unittest discover -s tests -t .` — covers state locking/atomicity,
 daemon scan/prune/keepalive decisions (including the recycled-pane guard),
-account selection, usage caching, and scraper auth/caching, all with tmux and
-HTTP mocked.
+daemon heartbeat read/write + the `_daemon_status_line` health classifier
+(not-running / stalled / stale-code / healthy), account selection, usage caching,
+and scraper auth/caching, all with tmux, launchctl, and HTTP mocked.

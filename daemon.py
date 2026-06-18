@@ -11,6 +11,7 @@ PID must still match — window indices can be recycled by tmux, and typing
 into whatever now lives at a recycled index would be worse than doing nothing.
 """
 import functools
+import json
 import logging
 import logging.handlers
 import os
@@ -26,6 +27,23 @@ LOG_FILE = BASE_DIR / "daemon.log"
 
 IDLE_THRESHOLD_SECS = 55 * 60  # 55 minutes
 CHECK_INTERVAL_SECS = 60
+
+# Daemon health telemetry. The whole tool is the keepalive daemon, yet two past
+# incidents (a multi-day crash-loop on a missing tmux, and a daemon left running
+# pre-fix code while a ghost pane sat idle 6+ days) went unnoticed because
+# `cms status` reported nothing about the daemon itself. The daemon now writes a
+# heartbeat each cycle so the CLI can flag a stalled or stale-code daemon.
+DAEMON_STATUS_FILE = BASE_DIR / "daemon_status.json"
+
+# A heartbeat older than this means the loop has wedged (or the process died
+# without unloading). Three missed cycles is unambiguous while tolerating one
+# slow cycle.
+STALE_HEARTBEAT_SECS = 3 * CHECK_INTERVAL_SECS
+
+# The daemon's code surface: if any of these are edited after the process
+# started, the running daemon is executing stale code and needs a restart to
+# pick up the change (the #1 recurring footgun in this project).
+_SOURCE_FILES = (BASE_DIR / "daemon.py", BASE_DIR / "statestore.py")
 
 # Cap the daemon log so a tight failure loop (or months of keepalive/prune
 # lines) can't grow it without bound. A missing tmux once spammed multiple MB
@@ -72,6 +90,54 @@ def _configure_logging(max_bytes: int = LOG_MAX_BYTES,
     root.setLevel(logging.INFO)
     root.addHandler(handler)
     return handler
+
+
+# ── Heartbeat / health ───────────────────────────────────────────────────────
+
+def source_mtime() -> float | None:
+    """Newest mtime across the daemon's source files, or None if unreadable.
+
+    Captured once at startup and stamped into every heartbeat; `cms status`
+    compares it against the live value to detect a daemon still running
+    pre-edit code (code changes only take effect on `cms daemon restart`).
+    """
+    mtimes = []
+    for f in _SOURCE_FILES:
+        try:
+            mtimes.append(f.stat().st_mtime)
+        except OSError:
+            continue
+    return max(mtimes) if mtimes else None
+
+
+def write_heartbeat(started_at: int, code_mtime: float | None, now: int):
+    """Record daemon liveness so the CLI can report health.
+
+    Single-writer (only the daemon touches this file), so an atomic replace is
+    enough — no lock needed. Best-effort: a heartbeat write must never crash the
+    daemon, so a disk error is logged and swallowed.
+    """
+    try:
+        statestore.atomic_write_json(
+            DAEMON_STATUS_FILE,
+            {
+                "pid": os.getpid(),
+                "started_at": started_at,
+                "code_mtime": code_mtime,
+                "last_run": now,
+            },
+        )
+    except OSError as e:
+        logging.warning(f"Could not write heartbeat: {e}")
+
+
+def read_status() -> dict | None:
+    """Read the daemon heartbeat file, or None if absent/corrupt."""
+    try:
+        data = json.loads(DAEMON_STATUS_FILE.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def list_live_panes() -> list[dict] | None:
@@ -211,10 +277,13 @@ def run_once(now: int | None = None):
 def main():
     _configure_logging()
     _ensure_tmux_env()
+    started_at = int(time.time())
+    code_mtime = source_mtime()  # snapshot the code this process is running
     logging.info("CMS keepalive daemon started")
 
     while True:
         try:
+            write_heartbeat(started_at, code_mtime, int(time.time()))
             run_once()
         except Exception as e:
             logging.error(f"Daemon error: {e}", exc_info=True)

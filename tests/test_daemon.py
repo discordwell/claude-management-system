@@ -168,6 +168,82 @@ class LoggingTest(unittest.TestCase):
             self.assertFalse((base / "daemon.log.3").exists())
 
 
+class HeartbeatTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.status_file = Path(self.tmp.name) / "daemon_status.json"
+        p = mock.patch.object(daemon, "DAEMON_STATUS_FILE", self.status_file)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_write_then_read_round_trips(self):
+        daemon.write_heartbeat(started_at=1000, code_mtime=42.5, now=1234)
+        status = daemon.read_status()
+        self.assertEqual(status["started_at"], 1000)
+        self.assertEqual(status["code_mtime"], 42.5)
+        self.assertEqual(status["last_run"], 1234)
+        self.assertIn("pid", status)
+
+    def test_read_status_missing_file_is_none(self):
+        self.assertIsNone(daemon.read_status())
+
+    def test_read_status_corrupt_file_is_none(self):
+        self.status_file.write_text("{truncated")
+        self.assertIsNone(daemon.read_status())
+
+    def test_read_status_non_object_is_none(self):
+        self.status_file.write_text('["not", "a", "dict"]')
+        self.assertIsNone(daemon.read_status())
+
+    def test_write_heartbeat_swallows_disk_error(self):
+        # A heartbeat write failure must never crash the daemon loop.
+        with mock.patch.object(daemon.statestore, "atomic_write_json",
+                               side_effect=OSError("disk full")), \
+             self.assertLogs(level="WARNING") as logs:
+            daemon.write_heartbeat(started_at=1, code_mtime=None, now=2)
+        self.assertTrue(any("heartbeat" in m.lower() for m in logs.output))
+
+
+class SourceMtimeTest(unittest.TestCase):
+    def test_returns_newest_mtime_of_real_sources(self):
+        # daemon.py and statestore.py exist; mtime is a positive float.
+        mt = daemon.source_mtime()
+        self.assertIsInstance(mt, float)
+        self.assertGreater(mt, 0)
+
+    def test_returns_none_when_no_sources_readable(self):
+        with mock.patch.object(daemon, "_SOURCE_FILES",
+                               (Path("/no/such/daemon.py"),)):
+            self.assertIsNone(daemon.source_mtime())
+
+
+class MainWritesHeartbeatTest(unittest.TestCase):
+    def test_loop_body_writes_heartbeat_before_running(self):
+        # main() must stamp a heartbeat each cycle so a wedged run_once still
+        # shows the daemon as alive. Drive exactly one iteration then bail.
+        calls = {"heartbeat": 0, "run_once": 0}
+
+        def fake_heartbeat(*a, **k):
+            calls["heartbeat"] += 1
+
+        def fake_run_once():
+            calls["run_once"] += 1
+
+        def stop(_secs):
+            raise KeyboardInterrupt  # break out after the first cycle
+
+        with mock.patch.object(daemon, "_configure_logging"), \
+             mock.patch.object(daemon, "_ensure_tmux_env"), \
+             mock.patch.object(daemon, "write_heartbeat", side_effect=fake_heartbeat), \
+             mock.patch.object(daemon, "run_once", side_effect=fake_run_once), \
+             mock.patch.object(daemon.time, "sleep", side_effect=stop):
+            with self.assertRaises(KeyboardInterrupt):
+                daemon.main()
+        self.assertEqual(calls["heartbeat"], 1)
+        self.assertEqual(calls["run_once"], 1)
+
+
 class RunOnceTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

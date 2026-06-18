@@ -349,6 +349,91 @@ class FmtSessionStatusTest(unittest.TestCase):
         self.assertEqual(cms._fmt_session_status({"status": "live", "idle_secs": None}), "live")
 
 
+class DaemonStatusLineTest(unittest.TestCase):
+    STALE = 180
+
+    def line(self, loaded, status, current_mtime=100.0, now=1000):
+        return cms._daemon_status_line(loaded, status, current_mtime, now, self.STALE)
+
+    def test_not_loaded(self):
+        self.assertIn("not running", self.line(False, None))
+
+    def test_loaded_without_heartbeat_suggests_restart(self):
+        # Fires right after this feature lands: the still-running old daemon
+        # writes no heartbeat, so the (accurate) nudge is to restart it.
+        msg = self.line(True, None)
+        self.assertIn("stale code", msg)
+        self.assertIn("restart", msg)
+
+    def test_fresh_heartbeat_reports_last_check_and_uptime(self):
+        status = {"last_run": 940, "code_mtime": 100.0, "started_at": 400}
+        msg = self.line(True, status, current_mtime=100.0, now=1000)
+        self.assertIn("running, last check", msg)
+        self.assertIn("up", msg)  # started_at present → uptime shown
+
+    def test_stale_heartbeat_is_stalled(self):
+        # last check 10 min ago, threshold 3 min → wedged loop.
+        status = {"last_run": 1000 - 600, "code_mtime": 100.0}
+        self.assertIn("STALLED", self.line(True, status, now=1000))
+
+    def test_missing_last_run_is_flagged(self):
+        self.assertIn("unreadable", self.line(True, {"code_mtime": 100.0}))
+
+    def test_newer_source_means_stale_code(self):
+        status = {"last_run": 990, "code_mtime": 100.0, "started_at": 500}
+        msg = self.line(True, status, current_mtime=500.0, now=1000)
+        self.assertIn("STALE code", msg)
+
+    def test_equal_mtime_is_not_stale(self):
+        status = {"last_run": 990, "code_mtime": 100.0, "started_at": 500}
+        msg = self.line(True, status, current_mtime=100.0, now=1000)
+        self.assertNotIn("STALE", msg)
+        self.assertIn("running, last check", msg)
+
+    def test_unknown_current_mtime_skips_stale_check(self):
+        # If we can't stat the live source, don't cry "stale" — just report up.
+        status = {"last_run": 990, "code_mtime": 100.0}
+        msg = self.line(True, status, current_mtime=None, now=1000)
+        self.assertNotIn("STALE", msg)
+        self.assertIn("running, last check", msg)
+
+    def test_stalled_takes_precedence_over_stale_code(self):
+        # A daemon that isn't even heartbeating: "STALLED" is the useful signal.
+        status = {"last_run": 0, "code_mtime": 100.0}
+        msg = self.line(True, status, current_mtime=500.0, now=1000)
+        self.assertIn("STALLED", msg)
+
+    def test_boolean_last_run_reads_as_unreadable_not_one(self):
+        # isinstance(True, int) is True — a corrupt heartbeat with a JSON bool
+        # in last_run must not be treated as the epoch second 1.
+        msg = self.line(True, {"last_run": True, "code_mtime": 100.0}, now=1000)
+        self.assertIn("unreadable", msg)
+        self.assertNotIn("STALLED", msg)
+
+    def test_boolean_mtimes_do_not_trigger_false_stale_code(self):
+        status = {"last_run": 990, "code_mtime": True, "started_at": 500}
+        msg = self.line(True, status, current_mtime=True, now=1000)
+        self.assertNotIn("STALE", msg)
+        self.assertIn("running, last check", msg)
+
+
+class DaemonLoadedTest(unittest.TestCase):
+    def proc(self, returncode):
+        return subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr="")
+
+    def test_true_when_launchctl_succeeds(self):
+        with mock.patch.object(cms.subprocess, "run", return_value=self.proc(0)):
+            self.assertTrue(cms._daemon_loaded())
+
+    def test_false_when_launchctl_fails(self):
+        with mock.patch.object(cms.subprocess, "run", return_value=self.proc(1)):
+            self.assertFalse(cms._daemon_loaded())
+
+    def test_false_when_launchctl_missing(self):
+        with mock.patch.object(cms.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertFalse(cms._daemon_loaded())
+
+
 class ShowStatusTest(unittest.TestCase):
     def test_dead_session_is_reported_as_gone(self):
         # A stale tracked pane (no live tmux pane) shows as gone, not as active.
@@ -358,6 +443,8 @@ class ShowStatusTest(unittest.TestCase):
         with mock.patch.object(cms, "is_configured", return_value=False), \
              mock.patch.object(statestore, "load_state",
                                return_value={"sessions": sessions, "next_session_id": 2}), \
+             mock.patch.object(cms, "_daemon_loaded", return_value=False), \
+             mock.patch("daemon.read_status", return_value=None), \
              mock.patch("daemon.list_live_panes", return_value=[]), \
              contextlib.redirect_stdout(buf):
             cms.show_status()
@@ -365,6 +452,22 @@ class ShowStatusTest(unittest.TestCase):
         self.assertIn("cms:0.0", out)
         self.assertIn("gone", out)
         self.assertIn("0 live", out)
+
+    def test_reports_daemon_health(self):
+        # `cms status` must surface daemon health — the gap that hid a multi-day
+        # crash-loop and a stale-code daemon in two prior incidents.
+        status = {"last_run": 1000, "code_mtime": 50.0, "started_at": 400, "pid": 7}
+        buf = io.StringIO()
+        with mock.patch.object(cms, "is_configured", return_value=False), \
+             mock.patch.object(statestore, "load_state",
+                               return_value={"sessions": {}, "next_session_id": 1}), \
+             mock.patch.object(cms, "_daemon_loaded", return_value=True), \
+             mock.patch("daemon.read_status", return_value=status), \
+             mock.patch("daemon.source_mtime", return_value=50.0), \
+             mock.patch.object(cms.time, "time", return_value=1000), \
+             contextlib.redirect_stdout(buf):
+            cms.show_status()
+        self.assertIn("Daemon: running", buf.getvalue())
 
 
 class LaunchSessionTest(unittest.TestCase):

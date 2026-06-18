@@ -309,6 +309,57 @@ def _fmt_session_status(row: dict) -> str:
     return f"live, idle {_fmt_duration(idle)}"
 
 
+def _is_number(value: object) -> bool:
+    """True for a real int/float, excluding bool (isinstance(True, int) is True).
+
+    Guards the same footgun as _utilization/_fmt_pct: daemon_status.json is
+    written by the daemon, but if it is ever hand-edited or truncated a JSON
+    bool in a numeric field must read as "not a number", not as 0/1.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _daemon_status_line(loaded: bool, status: dict | None,
+                        current_code_mtime: float | None, now: int,
+                        stale_after: int) -> str:
+    """One-line daemon health summary for `cms status` / `cms daemon status`.
+
+    Cross-checks launchd's view (``loaded``) against the daemon's own heartbeat
+    so the two failure modes that silently bit this project before become
+    visible: a wedged/crash-looping daemon (heartbeat goes stale) and a daemon
+    still running pre-edit code (its recorded code mtime is older than the live
+    source). Pure → unit-tested.
+    """
+    if not loaded:
+        return "not running — start with: cms daemon start"
+
+    if not status:
+        # launchd reports it loaded but there is no heartbeat: either a daemon
+        # predating heartbeats (so: stale code) or one that died before its
+        # first write. Either way a restart is the fix.
+        return ("running, but not reporting a heartbeat — likely stale code; "
+                "restart: cms daemon restart")
+
+    last_run = status.get("last_run")
+    age = now - last_run if _is_number(last_run) else None
+    if age is None:
+        return "running, but its heartbeat is unreadable — check: cms daemon logs"
+    if age >= stale_after:
+        return (f"running but STALLED — last check {_fmt_duration(int(age))} ago; "
+                f"check: cms daemon logs")
+
+    recorded_mtime = status.get("code_mtime")
+    if (_is_number(current_code_mtime) and _is_number(recorded_mtime)
+            and current_code_mtime > recorded_mtime + 1):
+        return ("running STALE code — daemon.py/statestore.py changed since it "
+                "started; apply with: cms daemon restart")
+
+    started_at = status.get("started_at")
+    uptime = (f", up {_fmt_duration(int(now - started_at))}"
+              if _is_number(started_at) and now >= started_at else "")
+    return f"running, last check {_fmt_duration(int(age))} ago{uptime}"
+
+
 def show_status():
     print("═══ Claude Management System ═══\n")
     for acct in ("primary", "secondary"):
@@ -322,15 +373,22 @@ def show_status():
         print(f"    Sonnet  (7d):  {_fmt_util(data, 'seven_day_sonnet')}")
         print()
 
+    import daemon
+
+    now = int(time.time())
+    daemon_line = _daemon_status_line(
+        _daemon_loaded(), daemon.read_status(), daemon.source_mtime(),
+        now, daemon.STALE_HEARTBEAT_SECS,
+    )
+    print(f"  Daemon: {daemon_line}\n")
+
     sessions = statestore.load_state().get("sessions", {})
     if not sessions:
         print("  No active sessions tracked.")
         return
 
-    import daemon
-
     panes = daemon.list_live_panes()
-    rows = _session_liveness(sessions, panes, int(time.time()))
+    rows = _session_liveness(sessions, panes, now)
     live = sum(1 for r in rows if r["status"] == "live")
     print(f"  Tracked sessions: {len(rows)} ({live} live)")
     for r in rows:
@@ -339,6 +397,17 @@ def show_status():
 
 
 # ── Daemon ───────────────────────────────────────────────────────────────────
+
+def _daemon_loaded() -> bool:
+    """True if launchd currently has the keepalive daemon job loaded."""
+    try:
+        r = subprocess.run(
+            ["launchctl", "list", DAEMON_LABEL], capture_output=True, text=True
+        )
+    except FileNotFoundError:
+        return False
+    return r.returncode == 0
+
 
 def _plist_content() -> str:
     py = sys.executable
@@ -395,14 +464,19 @@ def manage_daemon(action: str):
         print("Daemon stopped.")
 
     elif action == "status":
+        import daemon
+
         r = subprocess.run(
             ["launchctl", "list", DAEMON_LABEL], capture_output=True, text=True
         )
-        if r.returncode == 0:
-            print("Daemon is RUNNING.")
+        loaded = r.returncode == 0
+        line = _daemon_status_line(
+            loaded, daemon.read_status(), daemon.source_mtime(),
+            int(time.time()), daemon.STALE_HEARTBEAT_SECS,
+        )
+        print(f"Daemon: {line}")
+        if loaded:
             print(r.stdout)
-        else:
-            print("Daemon is NOT running.")
 
     elif action == "restart":
         manage_daemon("stop")

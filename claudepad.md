@@ -2,6 +2,38 @@
 
 ## Session Summaries
 
+### 2026-06-18T12:01Z
+Added **daemon health visibility** — the gap behind this project's two worst
+recurring incidents. Both were silent: a daemon crash-looping for days on a
+missing-tmux `FileNotFoundError`, and a daemon left running pre-fix code while a
+ghost pane sat idle 6d 13h with no keepalives. `cms status` showed quota and
+sessions but *nothing* about the daemon itself, so neither was noticed until a
+manual log dive. Fix: the daemon now writes a heartbeat to `daemon_status.json`
+at the top of every cycle — `{pid, started_at, code_mtime, last_run}` — where
+`code_mtime` is snapshotted **once at startup** from `daemon.py`+`statestore.py`
+(`daemon.source_mtime()`). `cms status` (and `cms daemon status`) render a new
+"Daemon:" line via the pure `cms._daemon_status_line()`, which cross-checks
+launchd (`_daemon_loaded()`, real `launchctl list`) against the heartbeat and
+classifies: **not running** / **STALLED** (no heartbeat in 3 cycles) / **STALE
+code** (live source mtime > recorded) / **running, last check Ns ago, up Hh Mm**.
+Single-writer file (daemon only) → atomic write, no lock; write failures logged
+and swallowed so a disk error can't kill the loop. Heartbeat is written in
+`main()`'s loop (not `run_once`) so a wedged `run_once` still reports alive.
+23 new tests (124 total green): heartbeat round-trip/corruption, `source_mtime`,
+the 6-state classifier, `_daemon_loaded`, and a `main()`-writes-heartbeat check.
+Code-review pass (3 parallel finder agents: correctness / regression / convention
++cleanup) found no bugs/regressions; acted on one consistency nit — extracted
+`cms._is_number()` so the classifier honors the repo's documented
+`isinstance(True, int)` bool-footgun guard (a hand-corrupted heartbeat with a
+JSON bool in a numeric field now reads "unreadable", not epoch-second 1).
+Wet-tested read-only against the live box: the running daemon is loaded but
+emits no heartbeat → line correctly reads "running, but not reporting a heartbeat
+— likely stale code; restart: cms daemon restart" (matches the standing claudepad
+note that the daemon needs a restart to pick up prior fixes). Docs updated
+(README, ARCHITECTURE daemon/status/state-files/tests). **User still needs
+`cms daemon restart`** to start emitting heartbeats (and to load all prior
+fixes). One commit on main, unpushed.
+
 ### 2026-06-18T00:39Z
 Robustness pass — 2 real fixes + 4 tests (101 total green; code-review sub-agent
 verdict SHIP, no defects). (1) **Scraper auth errors were unhelpful on the

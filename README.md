@@ -7,6 +7,7 @@ and keeps idle sessions' prompt caches warm.
   window) on the account with the most headroom: it skips an account whose
   weekly cap is exhausted, then picks the lower 5-hour usage
 - `cms status` — live quota for both accounts (5-hour, 7-day, Sonnet buckets),
+  a daemon health line (running / stalled / running stale code, with the fix),
   plus each tracked session's live/idle state (reconciled against tmux, so
   stale entries show as `gone` rather than lingering)
 - A launchd keepalive daemon sends a tiny `.` message to any tracked session
