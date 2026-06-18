@@ -81,11 +81,18 @@ def list_live_panes() -> list[dict] | None:
     Returns [] when no server is running (panes are definitively gone) and
     None on unexpected tmux errors (caller should skip the cycle, not prune).
     """
-    result = subprocess.run(
-        [_tmux_bin(), "list-panes", "-a", "-F", PANE_LIST_FORMAT],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [_tmux_bin(), "list-panes", "-a", "-F", PANE_LIST_FORMAT],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        # tmux isn't installed (or vanished). Treat like any other tmux failure:
+        # return None so the daemon skips this cycle instead of pruning, and
+        # `cms status` shows liveness as 'unknown' rather than crashing.
+        logging.warning("tmux binary not found; skipping this cycle")
+        return None
     if result.returncode != 0:
         stderr = result.stderr.lower()
         # "error connecting to <socket>" is what some tmux builds emit when

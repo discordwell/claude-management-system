@@ -143,6 +143,22 @@ def _parse_pane_output(out: str) -> tuple[str, str | None, str | None]:
     return addr, uid or None, pid or None
 
 
+def _tmux(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """Run a tmux command, exiting with a one-line hint if tmux is absent.
+
+    The interactive CLI relies on tmux being on PATH (the daemon, which runs
+    under launchd's bare PATH, resolves the binary explicitly). If tmux is
+    genuinely not installed — e.g. a fresh box where install.sh's `brew install
+    tmux` never ran — surface an install hint instead of a raw FileNotFoundError
+    traceback.
+    """
+    try:
+        return subprocess.run(["tmux", *args], **kwargs)
+    except FileNotFoundError:
+        print("tmux not found — install it (e.g. `brew install tmux`) and ensure it is on your PATH.")
+        sys.exit(1)
+
+
 def launch_session(account: str | None = None):
     if account is None:
         account, usage = best_account()
@@ -167,14 +183,14 @@ def launch_session(account: str | None = None):
     tmux_cmd = ["bash", str(LAUNCH_SCRIPT), account]
 
     # Create window in existing session, or bootstrap a new one
-    result = subprocess.run(
-        ["tmux", "new-window", "-n", pane_name, "-P", "-F", PANE_OUTPUT_FORMAT] + tmux_cmd,
+    result = _tmux(
+        ["new-window", "-n", pane_name, "-P", "-F", PANE_OUTPUT_FORMAT] + tmux_cmd,
         capture_output=True, text=True,
     )
     if result.returncode != 0:
         # No session running — create one
-        result = subprocess.run(
-            ["tmux", "new-session", "-d", "-s", "cms", "-n", pane_name, "-P", "-F",
+        result = _tmux(
+            ["new-session", "-d", "-s", "cms", "-n", pane_name, "-P", "-F",
              PANE_OUTPUT_FORMAT] + tmux_cmd,
             capture_output=True, text=True,
         )
@@ -201,9 +217,9 @@ def launch_session(account: str | None = None):
     # Attach — split on ":" to get session name (pane_addr is "session:window.pane")
     session_name = pane_addr.split(":")[0]
     if os.environ.get("TMUX"):
-        subprocess.run(["tmux", "select-window", "-t", pane_uid or pane_addr])
+        _tmux(["select-window", "-t", pane_uid or pane_addr])
     else:
-        subprocess.run(["tmux", "attach", "-t", session_name])
+        _tmux(["attach", "-t", session_name])
 
 
 # ── Status ───────────────────────────────────────────────────────────────────

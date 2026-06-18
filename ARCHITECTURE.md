@@ -19,6 +19,11 @@ and maintain prompt cache by sending keepalive pings to idle sessions.
   cached org uuid (primary scrapes with live Chrome cookies, so that uuid is the
   only thing that can go stale — e.g. after logging Chrome into a different org)
 - `cms daemon start|stop|status|restart|logs`: manage keepalive daemon
+- All tmux invocations run through `_tmux()`, which exits with a one-line
+  install hint if tmux is missing (a fresh box where `brew install tmux` never
+  ran) rather than dumping a `FileNotFoundError` traceback. `cms status` keeps
+  working without tmux — `list_live_panes` returns `None` and liveness shows as
+  `unknown`, while the quota section (which needs no tmux) still renders
 
 ### `statestore.py` — Shared state storage
 - Both the CLI and the daemon mutate `state.json`, so all read-modify-write
@@ -34,6 +39,11 @@ and maintain prompt cache by sending keepalive pings to idle sessions.
 - Required header: `anthropic-client-platform: web_claude_ai` (Bearer token → 403; cookies + this header → 200)
 - API: `GET https://claude.ai/api/organizations` → org UUID, then
        `GET https://claude.ai/api/organizations/{uuid}/usage`
+- Both requests go through `_auth_checked_get`, which maps a 401/403 to an
+  actionable `RuntimeError` ("run `cms setup --reauth {account}`"). The org
+  uuid is cached, so on the common path the usage call is the *only* request —
+  routing it through the same check means a stale-cookie failure still explains
+  the fix instead of surfacing a bare `HTTP 403`
 - Returns: `{five_hour: {utilization, resets_at}, seven_day: {...}, seven_day_sonnet: {...}, ...}`
 - All requests carry a 30s timeout; results cached in `cache.json` for 5 minutes (CACHE_TTL)
 - Heavy deps (`requests`, `browser_cookie3`, `playwright`) import lazily so the module always imports
@@ -54,7 +64,8 @@ and maintain prompt cache by sending keepalive pings to idle sessions.
 - Entries written by older versions (no pane id recorded) fall back to matching
   the `session:window.pane` address
 - Auto-removes dead panes via `statestore.update_state` (fresh re-read under
-  the lock); unexpected tmux failures skip the cycle rather than pruning
+  the lock); unexpected tmux failures — including a missing tmux binary
+  (`FileNotFoundError`) — skip the cycle rather than pruning
 - Logs to `daemon.log` (size-capped: a `RotatingFileHandler` keeps it under
   ~1 MB with 3 rotations, so a failure loop can't fill the disk) and
   `daemon-error.log`

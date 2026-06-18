@@ -2,6 +2,30 @@
 
 ## Session Summaries
 
+### 2026-06-18T00:39Z
+Robustness pass — 2 real fixes + 4 tests (101 total green; code-review sub-agent
+verdict SHIP, no defects). (1) **Scraper auth errors were unhelpful on the
+common path**: `_get_org_uuid` mapped a 403 to the friendly "run `cms setup
+--reauth`" hint, but once `org_uuid` is cached (the normal case) the *only*
+request is to `/usage`, whose 403 went through a bare `raise_for_status()` — so
+a stale-cookie failure surfaced as `could not fetch usage: 403 Client Error`
+instead of the actionable hint. Extracted `_auth_checked_get(account, s, url)`
+(maps 401/403 → reauth `RuntimeError`, else `raise_for_status`) and routed both
+the org-discovery and usage GETs through it; now a stale cookie always explains
+the fix regardless of cache state. Also newly handles 401, not just 403. (2)
+**`cms` crashed with a raw traceback when tmux is absent**: `launch_session`
+and `list_live_panes` called tmux with no `FileNotFoundError` guard (the daemon
+resolves tmux robustly via `_tmux_bin`, but the CLI didn't) — a fresh box where
+`brew install tmux` failed got a stack trace. Added `cms._tmux()` wrapper
+(prints a one-line install hint + `sys.exit(1)` on `FileNotFoundError`) and
+routed all four launch-path tmux calls through it; `daemon.list_live_panes` now
+catches `FileNotFoundError` → logs + returns None, so `cms status` degrades to
+liveness "unknown" (quota still renders) and the daemon skips the cycle instead
+of pruning. Verified: both fixes are strict supersets of prior behavior (no
+happy-path change, other HTTP errors still raise), new tests fail against old
+code. Docs updated (ARCHITECTURE scraper + CLI sections). One commit on main,
+unpushed.
+
 ### 2026-06-17T19:31Z
 Polished the user-facing CLI in `cms.py` (4 real fixes + 31 new tests, 97 total
 green; code-review sub-agent verdict SHIP). (1) **`None%` banner bug**: the

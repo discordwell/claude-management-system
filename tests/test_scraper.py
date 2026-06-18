@@ -61,6 +61,24 @@ class ScraperTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "reauth"):
             scraper._get_org_uuid("primary", session)
 
+    def test_org_fetch_401_explains_reauth(self):
+        # A stale cookie can answer 401 as well as 403 — both are auth failures.
+        session = FakeSession({"/api/organizations": FakeResponse(status_code=401)})
+        with self.assertRaisesRegex(RuntimeError, "reauth"):
+            scraper._get_org_uuid("primary", session)
+
+    def test_usage_403_with_cached_org_surfaces_reauth_hint(self):
+        # The common path: org uuid is cached, so /usage is the only request.
+        # A 403 there must still produce the actionable reauth hint, not a bare
+        # HTTP error from raise_for_status().
+        self.cfg_path().write_text(json.dumps({"org_uuid": "u-1"}))
+        session = FakeSession(
+            {"/api/organizations/u-1/usage": FakeResponse(status_code=403)}
+        )
+        with mock.patch.object(scraper, "_build_session", return_value=session):
+            with self.assertRaisesRegex(RuntimeError, "reauth"):
+                scraper.get_usage("primary")
+
     def test_empty_org_list_is_an_error(self):
         session = FakeSession({"/api/organizations": FakeResponse(payload=[])})
         with self.assertRaisesRegex(RuntimeError, "No organizations"):

@@ -93,6 +93,25 @@ def _build_session(account: str):
         return _session_from_chrome()
 
 
+def _auth_checked_get(account: str, s, url: str):
+    """GET ``url``, turning an auth failure into an actionable reauth hint.
+
+    A stale browser cookie makes the claude.ai web API answer 401/403. Routing
+    *both* the org-discovery and usage requests through here means that hint
+    surfaces even when the org uuid is already cached — on that common path the
+    usage call is the only request made, so a bare ``HTTP 403`` from
+    raise_for_status() would otherwise be the only thing the user sees.
+    """
+    r = s.get(url, timeout=REQUEST_TIMEOUT)
+    if r.status_code in (401, 403):
+        raise RuntimeError(
+            f"Auth failed for '{account}' ({r.status_code}). "
+            f"Check Chrome login or run: cms setup --reauth {account}"
+        )
+    r.raise_for_status()
+    return r
+
+
 def _get_org_uuid(account: str, s) -> str:
     """Fetch and cache the org UUID (it never changes)."""
     cfg_file = ACCOUNTS_DIR / account / "scraper_config.json"
@@ -101,13 +120,7 @@ def _get_org_uuid(account: str, s) -> str:
     if "org_uuid" in cfg:
         return cfg["org_uuid"]
 
-    r = s.get(f"{BASE_URL}/api/organizations", timeout=REQUEST_TIMEOUT)
-    if r.status_code == 403:
-        raise RuntimeError(
-            f"Auth failed for '{account}' (403). "
-            f"Check Chrome login or run: cms setup --reauth {account}"
-        )
-    r.raise_for_status()
+    r = _auth_checked_get(account, s, f"{BASE_URL}/api/organizations")
     orgs = r.json()
     if not orgs:
         raise RuntimeError(f"No organizations returned for '{account}'")
@@ -126,8 +139,7 @@ def get_usage(account: str) -> dict:
     """
     s = _build_session(account)
     org_uuid = _get_org_uuid(account, s)
-    r = s.get(f"{BASE_URL}/api/organizations/{org_uuid}/usage", timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
+    r = _auth_checked_get(account, s, f"{BASE_URL}/api/organizations/{org_uuid}/usage")
     return r.json()
 
 

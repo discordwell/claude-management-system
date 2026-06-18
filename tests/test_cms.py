@@ -397,6 +397,17 @@ class LaunchSessionTest(unittest.TestCase):
              quiet(), self.assertRaises(SystemExit):
             cms.launch_session(account="secondary")
 
+    def test_missing_tmux_exits_with_hint_not_traceback(self):
+        # A box without tmux must get a one-line install hint, not a raw
+        # FileNotFoundError traceback out of subprocess.run.
+        buf = io.StringIO()
+        with mock.patch.object(cms, "is_configured", return_value=True), \
+             mock.patch.object(cms.subprocess, "run", side_effect=FileNotFoundError), \
+             mock.patch.dict(os.environ, {}, clear=True), \
+             contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
+            cms.launch_session(account="primary")
+        self.assertIn("tmux not found", buf.getvalue())
+
     def test_falls_back_to_new_session_when_no_window(self):
         calls = []
 

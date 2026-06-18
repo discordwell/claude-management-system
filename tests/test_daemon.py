@@ -52,6 +52,15 @@ class ListLivePanesTest(unittest.TestCase):
         with mock.patch.object(daemon.subprocess, "run", return_value=cp):
             self.assertIsNone(daemon.list_live_panes())
 
+    def test_missing_tmux_binary_skips_cycle(self):
+        # tmux not installed → FileNotFoundError. Treat as "can't tell": return
+        # None (so the daemon skips rather than prunes) and log it, instead of
+        # letting the traceback escape.
+        with mock.patch.object(daemon.subprocess, "run", side_effect=FileNotFoundError), \
+             self.assertLogs(level="WARNING") as logs:
+            self.assertIsNone(daemon.list_live_panes())
+        self.assertTrue(any("tmux" in m for m in logs.output))
+
     def test_non_integer_activity_becomes_none(self):
         # '²'.isdigit() is True but int('²') raises — must not crash the scan.
         out = "%0\t100\t²\tcms:0.0\n"
