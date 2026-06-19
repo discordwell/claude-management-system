@@ -2,6 +2,41 @@
 
 ## Session Summaries
 
+### 2026-06-19T03:58Z
+Closed the loop on this project's #1 recurring incident — the keepalive daemon
+silently not working (down or running pre-edit code) so idle sessions go cold
+(the 6d-idle ghost pane). Prior sessions made daemon health *visible in `cms
+status`*; this session surfaces it at the two moments it's most actionable.
+(1) **Launch-time warning**: `cms` / `cms primary` / `cms secondary` now print a
+one-line `⚠ keepalive daemon …` right after recording the new pane (before the
+blocking attach) whenever the daemon isn't *healthy* — the session is tracked
+for keepalive, but a sick daemon means its cache still goes cold. Healthy daemon
+stays silent; the check is best-effort (`except Exception: pass`) so a health
+hint can never break the launch. (2) **`cms daemon status` now exits non-zero**
+on any unhealthy state, so it's a scriptable health check —
+`cms daemon status || cms daemon restart` heals a stale-code daemon in cron
+without a human reading the log first. (3) Refactor enabling both: extracted the
+pure `_classify_daemon(...) -> (state, message)` (states: not_running /
+no_heartbeat / unreadable / stalled / stale_code / healthy) as the single source
+of truth, with `_live_daemon_state()` the one place that assembles live inputs
+(shared by `cms status` + the launch warning); `manage_daemon("status")` calls
+the classifier directly since it also needs the verbose `launchctl` dump. The
+old `_daemon_status_line` wrapper, now unused in production, was dropped and its
+message-wording tests repointed at `_classify_daemon(...)[1]`. Byte-identical
+messages → all prior daemon status-line assertions pass unchanged. 14 new tests
+(138 total green): the 6 classifier states, the launch warning (warns unhealthy /
+silent healthy / never raises), the launch-path integration (warn-when-down,
+silent-when-healthy), and the scriptable exit code. Code-review pass (3 parallel
+finder agents: correctness / regression / cleanup+conventions) found no
+bugs/regressions; acted on the one cleanup nit (extracted `_live_daemon_state()`
+to dedupe the live-arg assembly, then removed the redundant wrapper it exposed).
+**Wet-tested read-only against the live box**:
+`cms daemon status` exits 1 and the launch path prints the warning — both
+because the real daemon (PID 29274) predates heartbeats and is running stale
+code. **User still needs `cms daemon restart`** to load all prior fixes and
+start emitting heartbeats. Docs updated (README, ARCHITECTURE CLI/classifier/
+tests). One commit on main, unpushed.
+
 ### 2026-06-18T12:01Z
 Added **daemon health visibility** — the gap behind this project's two worst
 recurring incidents. Both were silent: a daemon crash-looping for days on a

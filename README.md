@@ -5,7 +5,10 @@ and keeps idle sessions' prompt caches warm.
 
 - `cms` — checks both accounts' quota and launches Claude Code (in a tmux
   window) on the account with the most headroom: it skips an account whose
-  weekly cap is exhausted, then picks the lower 5-hour usage
+  weekly cap is exhausted, then picks the lower 5-hour usage. If the keepalive
+  daemon is down, stalled, or running stale code, it warns right after the
+  launch — the new session is tracked for keepalive, but a sick daemon means
+  its prompt cache would still go cold
 - `cms status` — live quota for both accounts (5-hour, 7-day, Sonnet buckets),
   a daemon health line (running / stalled / running stale code, with the fix),
   plus each tracked session's live/idle state (reconciled against tmux, so
@@ -35,6 +38,7 @@ cms primary          # force a specific account
 cms secondary
 cms status           # quota for both accounts + live/idle of tracked sessions
 cms daemon logs      # tail the keepalive daemon log
+cms daemon status    # daemon health; exits non-zero if unhealthy (scriptable)
 cms daemon restart   # reload the daemon (needed after updating daemon.py)
 cms setup --reauth secondary   # redo browser login for scraping
 cms setup --reauth primary     # clear primary's cached org id (after Chrome re-login)

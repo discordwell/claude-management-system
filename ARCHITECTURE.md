@@ -10,7 +10,14 @@ and maintain prompt cache by sending keepalive pings to idle sessions.
 ### `cms.py` — CLI entry point
 - `cms` (no args): queries every *configured* account (one or both), picks the
   one with most headroom, launches Claude in a new tmux window — a single-account
-  (e.g. secondary-only) setup is supported, gated by `any_configured()`
+  (e.g. secondary-only) setup is supported, gated by `any_configured()`. Right
+  after recording the new pane (and before the blocking attach),
+  `_warn_if_keepalive_daemon_down()` checks daemon health and prints a one-line
+  warning unless the daemon is *healthy* — the session is tracked for keepalive,
+  but a down/stalled/stale-code daemon means its prompt cache would still go
+  cold (the ghost-pane failure mode, surfaced at the moment it is most
+  actionable). A healthy daemon stays silent; the check is best-effort
+  (exceptions swallowed) so a health hint can never break the launch itself
 - `cms status`: shows live quota for both accounts, a **daemon health line**, and
   each tracked session's live/idle state, reconciled against tmux via the daemon's
   pane matcher (a stale entry shows as `gone (daemon will prune)`, not as a phantom
@@ -18,12 +25,22 @@ and maintain prompt cache by sending keepalive pings to idle sessions.
   against the daemon's own heartbeat (`daemon.read_status()`) so a not-running,
   *stalled* (no recent heartbeat), or *stale-code* daemon is called out with the
   fix — the visibility gap that previously hid a multi-day crash-loop and a
-  6-day-idle ghost pane whose daemon was running pre-fix code
+  6-day-idle ghost pane whose daemon was running pre-fix code. The health
+  classification lives in one pure helper, `_classify_daemon()`, which returns
+  `(state, message)` where state is one of `not_running` / `no_heartbeat` /
+  `unreadable` / `stalled` / `stale_code` / `healthy`, plus the human message.
+  `_live_daemon_state()` is the one place that assembles the live inputs and
+  calls it, so the human line in `cms status`, the launch-time warning, and the
+  exit code of `cms daemon status` all share one source of truth and can never
+  disagree about what "healthy" means
 - `cms setup [--reauth account]`: first-run wizard + browser context setup;
   `--reauth secondary` redoes the browser login, `--reauth primary` clears the
   cached org uuid (primary scrapes with live Chrome cookies, so that uuid is the
   only thing that can go stale — e.g. after logging Chrome into a different org)
-- `cms daemon start|stop|status|restart|logs`: manage keepalive daemon
+- `cms daemon start|stop|status|restart|logs`: manage keepalive daemon.
+  `status` exits non-zero on any non-`healthy` state, so it doubles as a
+  scriptable health check — e.g. `cms daemon status || cms daemon restart` in a
+  cron job heals a stale-code daemon without a human noticing the log first
 - All tmux invocations run through `_tmux()`, which exits with a one-line
   install hint if tmux is missing (a fresh box where `brew install tmux` never
   ran) rather than dumping a `FileNotFoundError` traceback. `cms status` keeps
@@ -149,6 +166,9 @@ for as long as the session is open.
 
 `python3 -m unittest discover -s tests -t .` — covers state locking/atomicity,
 daemon scan/prune/keepalive decisions (including the recycled-pane guard),
-daemon heartbeat read/write + the `_daemon_status_line` health classifier
-(not-running / stalled / stale-code / healthy), account selection, usage caching,
-and scraper auth/caching, all with tmux, launchctl, and HTTP mocked.
+daemon heartbeat read/write + the `_classify_daemon` health classifier — both
+states and exact messages — (not-running / no-heartbeat / unreadable / stalled /
+stale-code / healthy), the launch-time keepalive warning (warns when unhealthy,
+silent when healthy, never raises), the scriptable `cms daemon status` exit code,
+account selection, usage caching, and scraper auth/caching, all with tmux,
+launchctl, and HTTP mocked.

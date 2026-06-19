@@ -213,6 +213,7 @@ def launch_session(account: str | None = None):
     statestore.update_state(record_session)
 
     print(f"Launched pane: {pane_addr}  (tracked for keepalive)")
+    _warn_if_keepalive_daemon_down()
 
     # Attach — split on ":" to get session name (pane_addr is "session:window.pane")
     session_name = pane_addr.split(":")[0]
@@ -319,45 +320,91 @@ def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _daemon_status_line(loaded: bool, status: dict | None,
-                        current_code_mtime: float | None, now: int,
-                        stale_after: int) -> str:
-    """One-line daemon health summary for `cms status` / `cms daemon status`.
+def _classify_daemon(loaded: bool, status: dict | None,
+                     current_code_mtime: float | None, now: int,
+                     stale_after: int) -> tuple[str, str]:
+    """Classify keepalive-daemon health → ``(state, message)``. Pure.
 
     Cross-checks launchd's view (``loaded``) against the daemon's own heartbeat
     so the two failure modes that silently bit this project before become
     visible: a wedged/crash-looping daemon (heartbeat goes stale) and a daemon
     still running pre-edit code (its recorded code mtime is older than the live
-    source). Pure → unit-tested.
+    source).
+
+    ``state`` is one of ``not_running`` / ``no_heartbeat`` / ``unreadable`` /
+    ``stalled`` / ``stale_code`` / ``healthy``. Only ``healthy`` means
+    keepalives are actually firing on current code — every other state means an
+    idle session's prompt cache will quietly go cold. The single source of truth
+    behind the human line shown in `cms status`, the scriptable exit code of
+    `cms daemon status`, and the launch-time warning (all via `_live_daemon_state`).
     """
     if not loaded:
-        return "not running — start with: cms daemon start"
+        return ("not_running", "not running — start with: cms daemon start")
 
     if not status:
         # launchd reports it loaded but there is no heartbeat: either a daemon
         # predating heartbeats (so: stale code) or one that died before its
         # first write. Either way a restart is the fix.
-        return ("running, but not reporting a heartbeat — likely stale code; "
+        return ("no_heartbeat",
+                "running, but not reporting a heartbeat — likely stale code; "
                 "restart: cms daemon restart")
 
     last_run = status.get("last_run")
     age = now - last_run if _is_number(last_run) else None
     if age is None:
-        return "running, but its heartbeat is unreadable — check: cms daemon logs"
+        return ("unreadable",
+                "running, but its heartbeat is unreadable — check: cms daemon logs")
     if age >= stale_after:
-        return (f"running but STALLED — last check {_fmt_duration(int(age))} ago; "
+        return ("stalled",
+                f"running but STALLED — last check {_fmt_duration(int(age))} ago; "
                 f"check: cms daemon logs")
 
     recorded_mtime = status.get("code_mtime")
     if (_is_number(current_code_mtime) and _is_number(recorded_mtime)
             and current_code_mtime > recorded_mtime + 1):
-        return ("running STALE code — daemon.py/statestore.py changed since it "
+        return ("stale_code",
+                "running STALE code — daemon.py/statestore.py changed since it "
                 "started; apply with: cms daemon restart")
 
     started_at = status.get("started_at")
     uptime = (f", up {_fmt_duration(int(now - started_at))}"
               if _is_number(started_at) and now >= started_at else "")
-    return f"running, last check {_fmt_duration(int(age))} ago{uptime}"
+    return ("healthy", f"running, last check {_fmt_duration(int(age))} ago{uptime}")
+
+
+def _live_daemon_state() -> tuple[str, str]:
+    """Classify the daemon from live inputs (launchd + heartbeat + source mtime).
+
+    The single place that assembles the live arguments for `_classify_daemon`,
+    so `cms status` and the launch-time warning can never disagree about whether
+    the daemon is healthy. (`cms daemon status` runs its own `launchctl list` —
+    it also needs the verbose job dump — so it calls `_classify_daemon` directly
+    rather than paying for a second `launchctl` invocation here.)
+    """
+    import daemon
+
+    return _classify_daemon(
+        _daemon_loaded(), daemon.read_status(), daemon.source_mtime(),
+        int(time.time()), daemon.STALE_HEARTBEAT_SECS,
+    )
+
+
+def _warn_if_keepalive_daemon_down():
+    """Warn at launch time if the just-tracked session won't get keepalives.
+
+    `cms` records the new pane for keepalive, but if the daemon is down, stalled,
+    or running stale code the prompt cache still goes cold — exactly the
+    ghost-pane incident `cms status` was taught to surface. Surface it here too,
+    at the one moment it is most actionable: right after the launch. A healthy
+    daemon stays silent so the banner is uncluttered. Best-effort — a health
+    hint must never break the launch itself.
+    """
+    try:
+        state, msg = _live_daemon_state()
+        if state != "healthy":
+            print(f"  ⚠ keepalive daemon {msg}")
+    except Exception:
+        pass
 
 
 def show_status():
@@ -376,11 +423,7 @@ def show_status():
     import daemon
 
     now = int(time.time())
-    daemon_line = _daemon_status_line(
-        _daemon_loaded(), daemon.read_status(), daemon.source_mtime(),
-        now, daemon.STALE_HEARTBEAT_SECS,
-    )
-    print(f"  Daemon: {daemon_line}\n")
+    print(f"  Daemon: {_live_daemon_state()[1]}\n")
 
     sessions = statestore.load_state().get("sessions", {})
     if not sessions:
@@ -470,13 +513,17 @@ def manage_daemon(action: str):
             ["launchctl", "list", DAEMON_LABEL], capture_output=True, text=True
         )
         loaded = r.returncode == 0
-        line = _daemon_status_line(
+        state, line = _classify_daemon(
             loaded, daemon.read_status(), daemon.source_mtime(),
             int(time.time()), daemon.STALE_HEARTBEAT_SECS,
         )
         print(f"Daemon: {line}")
         if loaded:
             print(r.stdout)
+        # Exit non-zero on any unhealthy state so this doubles as a scriptable
+        # health check, e.g. `cms daemon status || cms daemon restart`.
+        if state != "healthy":
+            sys.exit(1)
 
     elif action == "restart":
         manage_daemon("stop")

@@ -350,10 +350,12 @@ class FmtSessionStatusTest(unittest.TestCase):
 
 
 class DaemonStatusLineTest(unittest.TestCase):
+    """Pins the exact human wording of each daemon-health message."""
+
     STALE = 180
 
     def line(self, loaded, status, current_mtime=100.0, now=1000):
-        return cms._daemon_status_line(loaded, status, current_mtime, now, self.STALE)
+        return cms._classify_daemon(loaded, status, current_mtime, now, self.STALE)[1]
 
     def test_not_loaded(self):
         self.assertIn("not running", self.line(False, None))
@@ -417,6 +419,68 @@ class DaemonStatusLineTest(unittest.TestCase):
         self.assertIn("running, last check", msg)
 
 
+class ClassifyDaemonTest(unittest.TestCase):
+    STALE = 180
+
+    def state(self, loaded, status, current_mtime=100.0, now=1000):
+        return cms._classify_daemon(loaded, status, current_mtime, now, self.STALE)[0]
+
+    def test_not_running(self):
+        self.assertEqual(self.state(False, None), "not_running")
+
+    def test_no_heartbeat(self):
+        self.assertEqual(self.state(True, None), "no_heartbeat")
+
+    def test_unreadable_last_run(self):
+        self.assertEqual(self.state(True, {"code_mtime": 100.0}), "unreadable")
+
+    def test_stalled(self):
+        self.assertEqual(self.state(True, {"last_run": 1000 - 600, "code_mtime": 100.0}), "stalled")
+
+    def test_stale_code(self):
+        status = {"last_run": 990, "code_mtime": 100.0, "started_at": 500}
+        self.assertEqual(self.state(True, status, current_mtime=500.0), "stale_code")
+
+    def test_healthy(self):
+        status = {"last_run": 990, "code_mtime": 100.0, "started_at": 500}
+        self.assertEqual(self.state(True, status), "healthy")
+
+
+class WarnKeepaliveDaemonTest(unittest.TestCase):
+    def warn(self, loaded, status, source_mtime=100.0, now=1000):
+        buf = io.StringIO()
+        with mock.patch.object(cms, "_daemon_loaded", return_value=loaded), \
+             mock.patch("daemon.read_status", return_value=status), \
+             mock.patch("daemon.source_mtime", return_value=source_mtime), \
+             mock.patch.object(cms.time, "time", return_value=now), \
+             contextlib.redirect_stdout(buf):
+            cms._warn_if_keepalive_daemon_down()
+        return buf.getvalue()
+
+    def test_healthy_daemon_is_silent(self):
+        # A working daemon must not clutter the launch banner.
+        status = {"last_run": 990, "code_mtime": 100.0, "started_at": 500}
+        self.assertEqual(self.warn(True, status), "")
+
+    def test_down_daemon_warns(self):
+        out = self.warn(False, None)
+        self.assertIn("keepalive daemon", out)
+        self.assertIn("not running", out)
+
+    def test_stale_code_daemon_warns(self):
+        # The #1 recurring incident: daemon up but running pre-edit code.
+        status = {"last_run": 990, "code_mtime": 100.0, "started_at": 500}
+        self.assertIn("STALE code", self.warn(True, status, source_mtime=500.0))
+
+    def test_never_raises_on_internal_error(self):
+        # A health hint must never break the actual launch — swallow and stay silent.
+        buf = io.StringIO()
+        with mock.patch.object(cms, "_daemon_loaded", side_effect=RuntimeError("boom")), \
+             contextlib.redirect_stdout(buf):
+            cms._warn_if_keepalive_daemon_down()  # must not raise
+        self.assertEqual(buf.getvalue(), "")
+
+
 class DaemonLoadedTest(unittest.TestCase):
     def proc(self, returncode):
         return subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr="")
@@ -432,6 +496,30 @@ class DaemonLoadedTest(unittest.TestCase):
     def test_false_when_launchctl_missing(self):
         with mock.patch.object(cms.subprocess, "run", side_effect=FileNotFoundError):
             self.assertFalse(cms._daemon_loaded())
+
+
+class DaemonStatusExitTest(unittest.TestCase):
+    """`cms daemon status` exits non-zero when unhealthy → `... || cms daemon restart`."""
+
+    def proc(self, returncode):
+        return subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr="")
+
+    def test_unhealthy_exits_nonzero(self):
+        with mock.patch.object(cms.subprocess, "run", return_value=self.proc(1)), \
+             mock.patch("daemon.read_status", return_value=None), \
+             mock.patch("daemon.source_mtime", return_value=100.0), \
+             quiet(), self.assertRaises(SystemExit) as cm:
+            cms.manage_daemon("status")
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_healthy_does_not_exit(self):
+        status = {"last_run": 1000, "code_mtime": 100.0, "started_at": 400}
+        with mock.patch.object(cms.subprocess, "run", return_value=self.proc(0)), \
+             mock.patch("daemon.read_status", return_value=status), \
+             mock.patch("daemon.source_mtime", return_value=100.0), \
+             mock.patch.object(cms.time, "time", return_value=1000), \
+             quiet():
+            cms.manage_daemon("status")  # must not raise SystemExit
 
 
 class ShowStatusTest(unittest.TestCase):
@@ -526,6 +614,39 @@ class LaunchSessionTest(unittest.TestCase):
             cms.launch_session(account="primary")
         self.assertTrue(any(c[1] == "new-session" for c in calls))
         self.assertIn("cms:0.0", statestore.load_state()["sessions"])
+
+    def test_launch_warns_when_keepalive_daemon_down(self):
+        # The new pane is recorded for keepalive, but a down daemon means the
+        # cache will still go cold — say so at launch, when it's most actionable.
+        buf = io.StringIO()
+        with mock.patch.object(cms, "is_configured", return_value=True), \
+             mock.patch.object(cms.subprocess, "run", return_value=self.proc()), \
+             mock.patch.object(cms, "_daemon_loaded", return_value=False), \
+             mock.patch("daemon.read_status", return_value=None), \
+             mock.patch("daemon.source_mtime", return_value=100.0), \
+             mock.patch.dict(os.environ, {}, clear=True), \
+             contextlib.redirect_stdout(buf):
+            cms.launch_session(account="primary")
+        out = buf.getvalue()
+        self.assertIn("Launched pane", out)
+        self.assertIn("keepalive daemon", out)
+        self.assertIn("not running", out)
+
+    def test_launch_is_silent_when_keepalive_daemon_healthy(self):
+        status = {"last_run": 1000, "code_mtime": 100.0, "started_at": 400}
+        buf = io.StringIO()
+        with mock.patch.object(cms, "is_configured", return_value=True), \
+             mock.patch.object(cms.subprocess, "run", return_value=self.proc()), \
+             mock.patch.object(cms, "_daemon_loaded", return_value=True), \
+             mock.patch("daemon.read_status", return_value=status), \
+             mock.patch("daemon.source_mtime", return_value=100.0), \
+             mock.patch.object(cms.time, "time", return_value=1000), \
+             mock.patch.dict(os.environ, {}, clear=True), \
+             contextlib.redirect_stdout(buf):
+            cms.launch_session(account="primary")
+        out = buf.getvalue()
+        self.assertIn("Launched pane", out)
+        self.assertNotIn("keepalive daemon", out)
 
     def test_auto_select_banner_is_null_safe(self):
         # Regression: an explicit null utilization must not print 'None%'.
